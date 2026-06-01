@@ -1,11 +1,11 @@
 # Honk OS 🪿
 
-A small, educational operating system written in **pure Go**, for **RISC-V 64-bit**.
+A small, educational operating system written in **pure Go** for **RISC-V 64-bit**.
 
 Honk OS boots under [OpenSBI](https://github.com/riscv-software-src/opensbi) on
 the QEMU `virt` machine and runs the **standard Go runtime — goroutines,
 channels, and the garbage collector — directly in supervisor mode as the kernel
-itself.** There is no C in the kernel; the shell, the drivers, and the boot logic
+itself.** There is no C in the kernel: shell, drivers, and boot logic
 are all Go.
 
 ```
@@ -43,10 +43,9 @@ make test        # non-interactive smoke test: pipes a command session, expects 
 
 Plain Go can't target bare metal — it always assumes an OS underneath. Honk OS
 builds on [**Embedded Go**](https://embeddedgo.github.io/) (`GOOS=noos`), which
-runs the *real* Go runtime freestanding, and adds a small patch (vendored in
-[`toolchain/`](toolchain/)) that ports its RISC-V scheduler and trap handler from
-**machine mode** to **supervisor mode**, so the kernel runs cleanly under
-OpenSBI.
+runs the *real* Go runtime freestanding, plus a small vendored patch
+([`toolchain/`](toolchain/)) that ports its RISC-V scheduler and trap handler from
+**machine mode** to **supervisor mode** so the kernel runs cleanly under OpenSBI.
 
 The boot path:
 
@@ -83,7 +82,7 @@ touch the UART directly.
 
 The `arch` / `driver` / `console` / `shell` layering is the seam for growth: new
 hardware slots in as a `driver`, the `console.Device` interface accepts other
-transports, and the platform specifics stay in `arch`.
+transports, and platform specifics stay in `arch`.
 
 ## Status
 
@@ -91,7 +90,7 @@ Working today: boot → full Go runtime (goroutines, channels, GC, maps) in S-mo
 → interactive shell over a UART → clean poweroff.
 
 **The vision** — Honk as a minimal, readable, modern successor to xv6 — and the full
-curriculum/feature roadmap are in **[docs/ROADMAP.md](docs/ROADMAP.md)**. The near-term path:
+curriculum and roadmap live in **[docs/ROADMAP.md](docs/ROADMAP.md)**. The near-term path:
 
 - [ ] Sv39 paging / virtual memory + a U-mode syscall boundary
 - [ ] user processes (fork / exec / wait)

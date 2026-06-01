@@ -16,7 +16,7 @@ number is both Honk's feasibility proof and its readability ceiling.
 
 ## The spine — the curriculum every OS course covers
 
-xv6 earns its status from two things: a book **read alongside the source** (the John
+xv6 earns its status from two things: a book **read alongside the source** (the
 Lions *Commentary on UNIX* tradition) and a fixed, dependency-ordered lab progression.
 Honk reproduces that spine, done the Go way:
 
@@ -34,7 +34,7 @@ Honk reproduces that spine, done the Go way:
 
 ## The modern delta — close xv6's *self-documented* gaps
 
-xv6's authors list its simplifications in "Real world" sections. Those are the upgrade list:
+xv6's authors list its simplifications in "Real world" sections. Those are the upgrades:
 
 | xv6's documented gap | Honk's minimal teaching form | Verdict |
 |---|---|---|
@@ -59,7 +59,7 @@ xv6's authors list its simplifications in "Real world" sections. Those are the u
 
 ### The honesty rule (non-negotiable)
 
-Go's runtime *hides* the GC, the goroutine scheduler, and stack growth — exactly what xv6
+Go's runtime *hides* the GC, goroutine scheduler, and stack growth — exactly what xv6
 teaches by hand. Honk must (a) **document** what's hidden and (b) teach the cost *honestly*
 with Biscuit's real numbers (5–15% slower paths; up to ~13% kernel CPU for GC + stack
 checks; ~115 µs worst-case GC pause). [seL4](https://cacm.acm.org/research/sel4-formal-verification-of-an-operating-system-kernel/)'s
