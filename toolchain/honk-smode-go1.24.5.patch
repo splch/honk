@@ -1,0 +1,331 @@
+diff --git a/src/runtime/asm_noos_riscv64.h b/src/runtime/asm_noos_riscv64.h
+index 3e16998..e9b23f3 100644
+--- a/src/runtime/asm_noos_riscv64.h
++++ b/src/runtime/asm_noos_riscv64.h
+@@ -11,33 +11,51 @@
+ #define frm      0x002
+ #define fcsr     0x003 // fflags + frm
+ 
+-#define mstatus  0x300
+-#define medeleg  0x302
+-#define mideleg  0x303
+-#define mie      0x304
+-#define mtvec    0x305
+-
+-#define mscratch 0x340
+-#define mepc     0x341
+-#define mcause   0x342
+-#define mtval    0x343
+-#define mip      0x344
++// HONK OS: these "m*" names are redefined to the S-mode CSRs so the existing
++// trap handler / rt0_go asm runs in S-mode under OpenSBI (everything in S-mode).
++#define mstatus  0x100 // sstatus
++#define medeleg  0x302 // unused in S-mode (only in bypassed M-mode entry)
++#define mideleg  0x303 // unused in S-mode
++#define mie      0x104 // sie
++#define mtvec    0x105 // stvec
++
++#define mscratch 0x140 // sscratch
++#define mepc     0x141 // sepc
++#define mcause   0x142 // scause
++#define mtval    0x143 // stval
++#define mip      0x144 // sip
+ 
+ #define mhartid  0xF14
+ 
++// HONK OS: S-mode CSRs and bits for the S-mode-under-OpenSBI port.
++#define sstatus  0x100
++#define sie      0x104
++#define stvec    0x105
++#define sscratch 0x140
++#define sepc     0x141
++#define scause   0x142
++#define stval    0x143
++#define sip      0x144
++#define SIEn   1   // sstatus.SIE
++#define SPIEn  5   // sstatus.SPIE
++#define SPPn   8   // sstatus.SPP (1 bit)
++#define SSI (1<<1) // sip/sie software-interrupt
++#define STI (1<<5) // sip/sie timer-interrupt
++#define SRET  WORD $0x10200073
++
+ // mstatus field offsets
+ 
+-#define MIEn  3
+-#define MPIEn 7
+-#define MPPn 11
++#define MIEn  1  // sstatus.SIE
++#define MPIEn 5  // sstatus.SPIE
++#define MPPn  8  // sstatus.SPP (1 bit; everything-in-S keeps it 1)
+ #define FSn  13
+ 
+ // mip/mie bits
+ 
+-#define MSI (1<<3)
+-#define MTI (1<<7)
+-#define SEI (1<<9)
+-#define MEI (1<<11)
++#define MSI (1<<1)  // sip/sie SSIP/SSIE (S-mode software)
++#define MTI (1<<5)  // sip/sie STIP/STIE (S-mode timer)
++#define SEI (1<<9)  // sip/sie SEIP/SEIE (S-mode external)
++#define MEI (0)     // no separate M-external in S-mode
+ 
+ // core peripherals
+ 
+@@ -53,8 +71,9 @@
+ // instructinos not implemented by assembly
+ 
+ #define WFI   WORD $0x10500073
+-#define MRET  WORD $0x30200073
++#define MRET  WORD $0x10200073 // HONK: SRET (S-mode trap return; was MRET 0x30200073)
+ #define FENCE WORD $0x0ff0000f
++#define stimecmp 0x14D         // Sstc supervisor timer-compare CSR
+ 
+ #define CSRW(RS,CSR)     WORD $(0x1073 + RS<<15 + CSR<<20)
+ #define CSRR(CSR,RD)     WORD $(0x2073 + RD<<7 + CSR<<20)
+diff --git a/src/runtime/honk_noos_riscv64.go b/src/runtime/honk_noos_riscv64.go
+new file mode 100644
+index 0000000..5d34bda
+--- /dev/null
++++ b/src/runtime/honk_noos_riscv64.go
+@@ -0,0 +1,29 @@
++// HONK OS: S-mode bring-up helpers for the noos/riscv64 port.
++
++//go:build noos && riscv64
++
++package runtime
++
++// honkSmode proves the Go runtime executes in S-mode under OpenSBI: it prints a
++// line via the SBI legacy console_putchar call. It needs no heap or goroutines,
++// only a valid stack and g, so it can be called directly from the entry asm.
++//
++//go:nosplit
++func honkSmode() {
++	const s = "honk from Go running in S-mode!\n"
++	for i := 0; i < len(s); i++ {
++		sbiPutchar(s[i])
++	}
++}
++
++// sbiPutchar writes one byte to the console via the SBI legacy console_putchar
++// call (implemented in honk_noos_riscv64.s).
++//
++//go:nosplit
++func sbiPutchar(c byte)
++
++// setSSIP raises a supervisor software interrupt to this hart (sip.SSIP=1),
++// used by the scheduler as its wakeup mechanism in place of the M-mode CLINT.
++//
++//go:nosplit
++func setSSIP()
+diff --git a/src/runtime/honk_noos_riscv64.s b/src/runtime/honk_noos_riscv64.s
+new file mode 100644
+index 0000000..60aa48c
+--- /dev/null
++++ b/src/runtime/honk_noos_riscv64.s
+@@ -0,0 +1,21 @@
++// HONK OS: SBI console + S-mode helpers for the noos/riscv64 port.
++
++//go:build noos && riscv64
++
++#include "textflag.h"
++#include "asm_noos_riscv64.h"
++
++// func sbiPutchar(c byte)
++// SBI legacy console_putchar: EID(a7=X17)=0x01, char in a0=X10; ecall traps to
++// OpenSBI (M-mode) which writes the byte to the platform console.
++TEXT ·sbiPutchar(SB),NOSPLIT|NOFRAME,$0-1
++	MOVBU	c+0(FP), X10	// a0 = c
++	MOV	$1, X17		// a7 = SBI EID console_putchar
++	ECALL
++	RET
++
++// func setSSIP()
++// Raise a supervisor software interrupt to self by setting sip.SSIP (bit 1).
++TEXT ·setSSIP(SB),NOSPLIT|NOFRAME,$0-0
++	CSRSI	((1<<1), sip)	// sip.SSIP = 1
++	RET
+diff --git a/src/runtime/rt0_noos_riscv64.s b/src/runtime/rt0_noos_riscv64.s
+index 2335542..8337fc0 100644
+--- a/src/runtime/rt0_noos_riscv64.s
++++ b/src/runtime/rt0_noos_riscv64.s
+@@ -29,6 +29,49 @@ GLOBL runtime·waitInit(SB), NOPTR, $4
+ 
+ // _rt0_riscv64_noos initializes all running cores
+ TEXT _rt0_riscv64_noos(SB),NOSPLIT|NOFRAME,$0
++	// ---- HONK OS S-mode bring-up (single hart, increment 1) ----
++	// OpenSBI handed off in S-mode; X10(a0)=hartid, X11(a1)=DTB. Set up a
++	// stack, enable the FPU state, zero BSS, point g at harts[0], then call the
++	// Go function honkSmode to prove the Go runtime executes in S-mode (it
++	// prints via an SBI ecall). The original M-mode bootstrap below is left
++	// intact for linking but is not reached yet.
++	CSRCI  ((1<<SIEn), sstatus)  // clear sstatus.SIE (interrupts off)
++	MOV    $(1<<FSn), S0
++	CSRS   (s0, sstatus)         // sstatus.FS = Initial (enable FP state)
++
++	// SP = just above runtime end + one handler stack, 16-byte aligned
++	MOV  $runtime·end(SB), A0
++	ADD  $(handlerStackSize+15), A0
++	AND  $~15, A0
++	MOV  A0, X2
++
++	// zero BSS..ramend. Safe to clear the stack region: the return address is
++	// in RA (RISC-V link register), and memclr is a leaf that never spills it.
++	MOV   $runtime·bss(SB), A0
++	MOV   $runtime·ramend(SB), A1
++	SUB   A0, A1
++	CALL  ·memclrNoHeapPointers<ABIInternal>(SB)
++
++	// g = &harts[0]; set stack bounds and gh/mh links (mirrors the M-mode path)
++	MOV  $runtime·harts(SB), g
++	ADD  $-handlerStackSize, X2, A0
++	MOV  A0, (g_stack+stack_lo)(g)
++	MOV  X2, (g_stack+stack_hi)(g)
++	ADD  $cpuctx_mh, g, A0
++	MOV  g, m_g0(A0)
++	MOV  g, m_gsignal(A0)
++	MOV  A0, g_m(g)
++
++	// Enable the individual S-mode interrupts (still globally masked by SIE=0
++	// until rt0_go's SRET raises SPIE->SIE), install the trap vector, clear
++	// sscratch, then enter the real runtime bootstrap.
++	MOV   $intEnabled, S0
++	CSRW  (s0, sie)
++	MOV   $·trapHandler(SB), A0
++	CSRW  (a0, stvec)
++	CSRWI (0, sscratch)
++	JMP   runtime·rt0_go(SB)
++
+ 	// Disable interrupts globally, enable FPU (Kendryte K210 supports only
+ 	// FS=0(off)/3(dirty), this is a weakness of the Rocket Chip Generator used
+ 	// to generate K210 cores).
+@@ -226,9 +269,16 @@ TEXT runtime·rt0_go(SB),NOSPLIT|NOFRAME,$0
+ 	MOV   A0, g_m(A1)  // harts[0].gh.m = harts[0].mh
+ 	CSRW  (a1, mscratch)
+ 
+-	// switch to the user mode
++	// HONK S/U split (xv6 model): goroutines run in U-mode so their ecall
++	// syscalls trap *down* to our S-mode handler (an ecall from S would go up to
++	// OpenSBI instead). Clear sstatus.SPP=0 (return to U) and set SPIE=1 so
++	// interrupts are enabled after the SRET lands on the next instruction.
++	MOV    $(1<<SPPn), S0
++	CSRC   (s0, mstatus)   // sstatus.SPP = 0 -> SRET returns to U-mode
++	MOV    $(1<<SPIEn), S0
++	CSRS   (s0, mstatus)   // sstatus.SPIE = 1
+ 	AUIPC  $0, A0
+-	ADD    $16, A0  // A0 must point just after MRET
++	ADD    $16, A0  // A0 must point just after the SRET below
+ 	CSRW   (a0, mepc)
+ 	MRET
+ 
+diff --git a/src/runtime/tasker_noos_riscv64.go b/src/runtime/tasker_noos_riscv64.go
+index 8835d9c..9ebb13f 100644
+--- a/src/runtime/tasker_noos_riscv64.go
++++ b/src/runtime/tasker_noos_riscv64.go
+@@ -6,7 +6,6 @@ package runtime
+ 
+ import (
+ 	"internal/abi"
+-	"internal/cpu/riscv/clint"
+ 	"internal/cpu/riscv/plic"
+ 	"unsafe"
+ )
+@@ -19,7 +18,7 @@ func curcpuSavectxCall() {} // all registars saved on caller's stack
+ 
+ //go:nosplit
+ func (cpu *cpuctx) newwork() {
+-	clint.CLINT().MSIP[cpu.id()].Store(1)
++	setSSIP() // HONK S-mode: raise a supervisor software interrupt (was CLINT MSIP)
+ }
+ 
+ //go:nosplit
+@@ -47,7 +46,7 @@ var (
+ func taskerinit() {
+ 	// only hart0 runs this function
+ 
+-	ncpu = 2 // Maix Bit specific TODO: should be set/detected in _rt0_riscv64_noos
++	ncpu = 1 // HONK: single hart on QEMU virt
+ 	uharts := (*[maxHarts]uintptr)(unsafe.Pointer(&pharts))
+ 	for i := range harts {
+ 		hart := &harts[i]
+@@ -66,7 +65,7 @@ func taskerinit() {
+ 	// VIRT_CPUS_MAX * 2). Can raise Store Access Fault exception when less
+ 	// interrupts or contexts are supported or may not reset the whole PLIC.
+ 	PLIC := plic.PLIC()
+-	for ctxid := range 8 {
++	for ctxid := range 2 { // HONK: contexts 0(M)/1(S) on QEMU virt (was 8 -> "Invalid write" noise)
+ 		for i := range PLIC.EN[ctxid] {
+ 			PLIC.EN[ctxid][i].Store(0)
+ 		}
+@@ -76,7 +75,12 @@ func taskerinit() {
+ 
+ //go:nowritebarrierrec
+ //go:nosplit
+-func defaultWrite(fd int, p []byte) int { return len(p) }
++func defaultWrite(fd int, p []byte) int {
++	for i := 0; i < len(p); i++ {
++		sbiPutchar(p[i]) // HONK S-mode: route runtime output to the SBI console
++	}
++	return len(p)
++}
+ 
+ const (
+ 	// m.tls fields
+diff --git a/src/runtime/tasker_noos_riscv64.s b/src/runtime/tasker_noos_riscv64.s
+index 7b584d7..0075058 100644
+--- a/src/runtime/tasker_noos_riscv64.s
++++ b/src/runtime/tasker_noos_riscv64.s
+@@ -11,7 +11,7 @@
+ 
+ // func cpuid() int
+ TEXT ·cpuid(SB),NOSPLIT|NOFRAME,$0
+-	CSRR  (mhartid, s0)
++	MOV   $0, S0  // HONK: single hart on QEMU virt (no shartid CSR)
+ 	MOV   S0, ret+0(FP)
+ 	RET
+ 
+@@ -25,11 +25,11 @@ TEXT ·cpuid(SB),NOSPLIT|NOFRAME,$0
+ #define exteInt 8
+ 
+ DATA ·interruptHandlers+(softInt+userPriv)*8(SB)/8, $·defaultInterruptHandler(SB)
+-DATA ·interruptHandlers+(softInt+supePriv)*8(SB)/8, $·defaultInterruptHandler(SB)
++DATA ·interruptHandlers+(softInt+supePriv)*8(SB)/8, $·enterScheduler(SB) // HONK: SSI->scheduler
+ DATA ·interruptHandlers+(softInt+resePriv)*8(SB)/8, $·defaultInterruptHandler(SB)
+ DATA ·interruptHandlers+(softInt+machPriv)*8(SB)/8, $·enterScheduler(SB)
+ DATA ·interruptHandlers+(timeInt+userPriv)*8(SB)/8, $·defaultInterruptHandler(SB)
+-DATA ·interruptHandlers+(timeInt+supePriv)*8(SB)/8, $·defaultInterruptHandler(SB)
++DATA ·interruptHandlers+(timeInt+supePriv)*8(SB)/8, $·enterScheduler(SB) // HONK: STI->scheduler
+ DATA ·interruptHandlers+(timeInt+resePriv)*8(SB)/8, $·defaultInterruptHandler(SB)
+ DATA ·interruptHandlers+(timeInt+machPriv)*8(SB)/8, $·enterScheduler(SB)
+ DATA ·interruptHandlers+(exteInt+userPriv)*8(SB)/8, $·defaultInterruptHandler(SB)
+@@ -180,17 +180,11 @@ TEXT ·enterScheduler(SB),NOSPLIT|NOFRAME,$0
+ contextSaved:
+ 	MOVB  ZERO, (cpuctx_schedule)(g)
+ 
+-	// clear MSI and MTI
+-	MOV   $msip, A0
+-	CSRR  (mhartid, s0)
+-	SLL   $2, S0
+-	ADD   S0, A0
+-	MOVW  ZERO, (A0)
+-	MOV   $mtimecmp, A0
+-	SLL   $1, S0
+-	ADD   S0, A0
++	// HONK S-mode: clear SSI (sip.SSIP) and STI (stimecmp=max via Sstc)
++	MOV   $SSI, S0
++	CSRC  (s0, sip)
+ 	MOV   $-1, S0
+-	MOV   S0, (A0)
++	CSRW  (s0, stimecmp)
+ 
+ 	FENCE  // ensure clearing happens before checking nanotime and futexes
+ 
+@@ -250,7 +244,7 @@ TEXT ·externalInterruptHandler(SB),NOSPLIT|NOFRAME,$0
+ 	// BUG: the following code assumes two (M,S) PLIC contexts per hart
+ 	// ctxid = mhartid*2 + (11-mcause)/2
+ 	SRL   $3, A0  // mcause
+-	CSRR  (mhartid, a1)
++	MOV   $0, A1  // HONK: single hart
+ 	SLL   $2, A1
+ 	SUB   A0, A1   // mhartid*4 - mcause
+ 	SLL   $11, A1  // 0x1000*mhartid*2 - 0x1000*mcause/2

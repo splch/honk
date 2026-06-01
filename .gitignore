@@ -1,0 +1,9 @@
+# Build artifacts
+/.toolchain/
+*.elf
+/qemu.log
+*.dtb
+/out.txt
+
+# Local Claude Code config
+.claude/settings.local.json
