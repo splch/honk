@@ -100,7 +100,7 @@ attempt the proof). Each is high line-count, low concept-per-line.
   *2,000-line* readable RISC-V teaching OS. Honk's "readable surface" is *the kernel logic
   you read*; the runtime is a separate, instrumentable layer.
 
-## The roadmap (Honk is at boot + shell)
+## The roadmap
 
 0. **Sv39 paging** + a kernel page table → **U-mode trap/syscall layer**  *(unlocks everything)*
 1. **User processes** — load + run a user program in U-mode behind syscalls  *(the "goroutines ≠ processes" leap)*

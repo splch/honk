@@ -4,9 +4,9 @@ package riscv64
 
 import "unsafe"
 
-// MMIO device base addresses on the QEMU virt machine. OpenSBI grants
-// supervisor/user read+write to these pages, and Honk's goroutines run in
-// U-mode with no paging, so direct memory-mapped I/O is permitted.
+// MMIO device base addresses on the QEMU virt machine. With no paging yet,
+// OpenSBI's PMP leaves these pages readable/writable from both S- and U-mode,
+// so the accessors below reach them directly from user-mode goroutines.
 const (
 	UART0 = 0x10000000 // NS16550A UART
 	Test0 = 0x00100000 // sifive_test poweroff/reset device

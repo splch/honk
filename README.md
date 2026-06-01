@@ -10,14 +10,14 @@ channels, and the garbage collector — directly in supervisor mode as the kerne
 itself.** There is no C in the kernel: shell, drivers, and boot logic
 are all Go.
 
-A session looks like this (memory and version figures are illustrative — they
-shift as the GC runs and track the toolchain):
+A session looks like this — the goroutine count, memory, and version figures are
+illustrative; they shift as the GC runs and track the toolchain:
 
 ```
-   __         Honk OS
- <(o )___     pure Go on RISC-V, supervisor mode under OpenSBI
-  ( ._> /     goroutines and a garbage collector are the kernel
-   '---'      type 'help' for commands
+      __      Honk OS
+ \ __( .)<    pure Go on RISC-V, supervisor mode under OpenSBI
+  (  > )      goroutines and a garbage collector are the kernel
+  ~~~~~~      type 'help' for commands
 
 honk> uname
 Honk OS (pure Go) riscv64 S-mode/OpenSBI
@@ -74,40 +74,13 @@ runtime work in supervisor mode. With no paging yet, OpenSBI's PMP already grant
 U/S full access to RAM and the device MMIO pages, so user-mode goroutines can
 touch the UART directly.
 
-## Repository layout
-
-| Path | What |
-|------|------|
-| [`cmd/honk`](cmd/honk) | kernel entry — wires the console to the shell |
-| [`kernel/arch/riscv64`](kernel/arch/riscv64) | platform constants, MMIO accessors, poweroff, the boot device-tree blob |
-| [`kernel/dtb`](kernel/dtb) | device-tree (FDT) parser — discovers console/RAM/harts (host-tested) |
-| [`kernel/device`](kernel/device) | driver registry keyed by device-tree `compatible` string |
-| [`kernel/board`](kernel/board) | per-machine discovery with safe fallbacks (the fork point for new boards) |
-| [`kernel/driver/uart`](kernel/driver/uart) | polled NS16550A UART driver |
-| [`kernel/driver/sbi`](kernel/driver/sbi) | SBI-backed console — board-independent fallback |
-| [`kernel/console`](kernel/console) | line-editing terminal over a byte `Device` |
-| [`kernel/shell`](kernel/shell) | the interactive REPL |
-| [`toolchain`](toolchain) | the vendored runtime patch + `build-toolchain.sh` |
-
-The `arch` / `board` / `driver` / `console` / `shell` layering is the seam for
-growth: a `board` discovers hardware from the device tree and picks `driver`s by
-their `compatible` string, the `console.Device` interface accepts other
-transports, and platform specifics stay in `arch`. A fork retargets Honk by
-replacing `board` and registering its own drivers — no change to the core.
-
 ## Status
 
 Working today: boot → full Go runtime (goroutines, channels, GC, maps) in S-mode
 → interactive shell over a UART → clean poweroff.
 
 **The vision** — Honk as a minimal, readable, modern successor to xv6 — and the full
-curriculum and roadmap live in **[docs/ROADMAP.md](docs/ROADMAP.md)**. The near-term path:
-
-- [ ] Sv39 paging / virtual memory + a U-mode syscall boundary
-- [ ] user processes (fork / exec / wait)
-- [ ] virtio-blk + a crash-safe filesystem
-- [ ] copy-on-write fork, demand paging, mmap
-- [ ] a scheduler you build · minimal protection · virtio-net capstone
+curriculum and roadmap live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
 ## Credits & references
 

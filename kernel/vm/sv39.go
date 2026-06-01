@@ -118,8 +118,7 @@ func (m *Mapper) Lookup(va uintptr) (PTE, bool) {
 }
 
 // physOf/tableAt convert between a Go *Table and the physical address stored in
-// a PTE. Honk runs with physical == virtual for kernel memory (no kernel paging;
-// see the package design notes), so this identity holds both in tests and on the
-// machine.
+// a PTE. Honk's kernel memory is identity-mapped (physical == virtual), so this
+// identity holds both in host tests and on the machine.
 func physOf(t *Table) uintptr   { return uintptr(unsafe.Pointer(t)) }
 func tableAt(pa uintptr) *Table { return (*Table)(unsafe.Pointer(pa)) }

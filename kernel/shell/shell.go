@@ -14,10 +14,10 @@ import (
 )
 
 const banner = `
-   __         Honk OS
- <(o )___     pure Go on RISC-V, supervisor mode under OpenSBI
-  ( ._> /     goroutines and a garbage collector are the kernel
-   '---'      type 'help' for commands
+      __      Honk OS
+ \ __( .)<    pure Go on RISC-V, supervisor mode under OpenSBI
+  (  > )      goroutines and a garbage collector are the kernel
+  ~~~~~~      type 'help' for commands
 `
 
 // Run prints the banner and serves the REPL on c. It does not return; the
@@ -33,6 +33,7 @@ func Run(c *console.Console) {
 		f := strings.Fields(line)
 		switch f[0] {
 		case "help":
+			// Keep this list in sync with the cases below.
 			c.WriteString("commands: help, honk, echo <text>, uname, mem, gc, stats, devices, clear, halt\n")
 		case "honk":
 			c.WriteString("HONK!  (a goose approves)\n")
