@@ -1,13 +1,13 @@
 package board
 
 import (
-	"encoding/binary"
 	"testing"
 
 	"github.com/splch/honk/kernel/device"
 	"github.com/splch/honk/kernel/driver/sbi"
 	"github.com/splch/honk/kernel/driver/uart"
 	"github.com/splch/honk/kernel/dtb"
+	"github.com/splch/honk/kernel/internal/fdt"
 )
 
 // These tests run on the host. They drive the discovery logic through the real
@@ -63,119 +63,35 @@ func TestNS16550Registered(t *testing.T) {
 // given "compatible" string: root cells 2/2, /chosen pointing at the UART, RAM
 // at 0x80000000, two harts, and the UART at 0x10000000 under /soc.
 func blobWith(consoleCompat string) []byte {
-	var f fdt
-	f.begin("")
-	f.u32("#address-cells", 2)
-	f.u32("#size-cells", 2)
-	f.begin("chosen")
-	f.str("stdout-path", "/soc/serial@10000000")
-	f.end()
-	f.begin("memory@80000000")
-	f.str("device_type", "memory")
-	f.reg(0x80000000, 0x4000000)
-	f.end()
-	f.begin("cpus")
-	f.u32("#address-cells", 1)
-	f.u32("#size-cells", 0)
+	var b fdt.Builder
+	b.Begin("")
+	b.U32("#address-cells", 2)
+	b.U32("#size-cells", 2)
+	b.Begin("chosen")
+	b.Str("stdout-path", "/soc/serial@10000000")
+	b.End()
+	b.Begin("memory@80000000")
+	b.Str("device_type", "memory")
+	b.Reg(0x80000000, 0x4000000)
+	b.End()
+	b.Begin("cpus")
+	b.U32("#address-cells", 1)
+	b.U32("#size-cells", 0)
 	for i := 0; i < 2; i++ {
-		f.begin("cpu@" + string(rune('0'+i)))
-		f.str("device_type", "cpu")
-		f.u32("reg", uint32(i))
-		f.end()
+		b.Begin("cpu@" + string(rune('0'+i)))
+		b.Str("device_type", "cpu")
+		b.U32("reg", uint32(i))
+		b.End()
 	}
-	f.end()
-	f.begin("soc")
-	f.u32("#address-cells", 2)
-	f.u32("#size-cells", 2)
-	f.begin("serial@10000000")
-	f.str("compatible", consoleCompat)
-	f.reg(0x10000000, 0x100)
-	f.end()
-	f.end()
-	f.end()
-	return f.blob()
-}
-
-// fdt is a compact builder that emits a valid FDT blob for tests.
-type fdt struct {
-	structb []byte
-	strings []byte
-	offsets map[string]uint32
-}
-
-func (f *fdt) tok(v uint32)       { f.structb = beAppend(f.structb, v) }
-func (f *fdt) pad()               { f.structb = pad4(f.structb) }
-func (f *fdt) end()               { f.tok(2) } // FDT_END_NODE
-func (f *fdt) str(name, s string) { f.prop(name, append([]byte(s), 0)) }
-func (f *fdt) u32(name string, v uint32) {
-	var b [4]byte
-	binary.BigEndian.PutUint32(b[:], v)
-	f.prop(name, b[:])
-}
-func (f *fdt) reg(addr, size uint64) {
-	var b [16]byte
-	binary.BigEndian.PutUint64(b[0:], addr)
-	binary.BigEndian.PutUint64(b[8:], size)
-	f.prop("reg", b[:])
-}
-
-func (f *fdt) begin(name string) {
-	f.tok(1) // FDT_BEGIN_NODE
-	f.structb = append(f.structb, name...)
-	f.structb = append(f.structb, 0)
-	f.pad()
-}
-
-func (f *fdt) prop(name string, val []byte) {
-	if f.offsets == nil {
-		f.offsets = map[string]uint32{}
-	}
-	off, ok := f.offsets[name]
-	if !ok {
-		off = uint32(len(f.strings))
-		f.offsets[name] = off
-		f.strings = append(append(f.strings, name...), 0)
-	}
-	f.tok(3) // FDT_PROP
-	f.tok(uint32(len(val)))
-	f.tok(off)
-	f.structb = append(f.structb, val...)
-	f.pad()
-}
-
-func (f *fdt) blob() []byte {
-	f.tok(9) // FDT_END
-	const hdr, memrsv = 40, 16
-	structOff := uint32(hdr + memrsv)
-	stringsOff := structOff + uint32(len(f.structb))
-
-	var out []byte
-	put := func(v uint32) { out = beAppend(out, v) }
-	put(0xd00dfeed)                          // magic
-	put(stringsOff + uint32(len(f.strings))) // totalsize
-	put(structOff)
-	put(stringsOff)
-	put(hdr) // off_mem_rsvmap
-	put(17)  // version
-	put(16)  // last_comp_version
-	put(0)   // boot_cpuid_phys
-	put(uint32(len(f.strings)))
-	put(uint32(len(f.structb)))
-	out = append(out, make([]byte, memrsv)...) // terminating reservation
-	out = append(out, f.structb...)
-	out = append(out, f.strings...)
-	return out
-}
-
-func beAppend(b []byte, v uint32) []byte {
-	var w [4]byte
-	binary.BigEndian.PutUint32(w[:], v)
-	return append(b, w[:]...)
-}
-
-func pad4(b []byte) []byte {
-	for len(b)%4 != 0 {
-		b = append(b, 0)
-	}
-	return b
+	b.End()
+	b.Begin("soc")
+	b.U32("#address-cells", 2)
+	b.U32("#size-cells", 2)
+	b.Begin("serial@10000000")
+	b.Str("compatible", consoleCompat)
+	b.Reg(0x10000000, 0x100)
+	b.End()
+	b.End()
+	b.End()
+	return b.Bytes()
 }
