@@ -37,3 +37,27 @@ func Poweroff() {
 	for {
 	}
 }
+
+// dtbPtr is the address of the device tree blob the firmware passed at boot
+// (RISC-V delivers it to the kernel in register a1). It stays 0 until the
+// runtime entry stub preserves a1 across BSS-clear and stores it here. While it
+// is 0, DTB returns nil and the board falls back to its defaults, so the kernel
+// boots either way; capturing the pointer upgrades the board to live discovery.
+var dtbPtr uintptr
+
+// DTB returns the device tree blob the firmware passed at boot, sliced to the
+// length in its FDT header, or nil when none was captured. Parsing it (package
+// dtb) is how the board discovers the console, RAM, and hart count instead of
+// hardcoding them for one machine.
+func DTB() []byte {
+	if dtbPtr == 0 {
+		return nil
+	}
+	head := unsafe.Slice((*byte)(unsafe.Pointer(dtbPtr)), 8)
+	magic := uint32(head[0])<<24 | uint32(head[1])<<16 | uint32(head[2])<<8 | uint32(head[3])
+	if magic != 0xd00dfeed { // FDT magic
+		return nil
+	}
+	total := uint32(head[4])<<24 | uint32(head[5])<<16 | uint32(head[6])<<8 | uint32(head[7])
+	return unsafe.Slice((*byte)(unsafe.Pointer(dtbPtr)), total)
+}

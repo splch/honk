@@ -1,7 +1,19 @@
-// Package uart is a minimal polled NS16550A UART driver.
+// Package uart is a minimal polled NS16550A UART driver. It registers itself
+// under the device-tree "compatible" strings QEMU and real boards use, so the
+// board layer can discover it from the device tree (see package board).
 package uart
 
-import "github.com/splch/honk/kernel/arch/riscv64"
+import (
+	"github.com/splch/honk/kernel/arch/riscv64"
+	"github.com/splch/honk/kernel/console"
+	"github.com/splch/honk/kernel/device"
+)
+
+func init() {
+	ctor := func(base uintptr) console.Device { return New(base) }
+	device.RegisterConsole("ns16550a", ctor)
+	device.RegisterConsole("ns16550", ctor)
+}
 
 // NS16550A register offsets and line-status bits.
 const (

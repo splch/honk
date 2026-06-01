@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/splch/honk/kernel/arch/riscv64"
+	"github.com/splch/honk/kernel/board"
 	"github.com/splch/honk/kernel/console"
 )
 
@@ -32,7 +33,7 @@ func Run(c *console.Console) {
 		f := strings.Fields(line)
 		switch f[0] {
 		case "help":
-			c.WriteString("commands: help, honk, echo <text>, uname, mem, gc, stats, clear, halt\n")
+			c.WriteString("commands: help, honk, echo <text>, uname, mem, gc, stats, devices, clear, halt\n")
 		case "honk":
 			c.WriteString("HONK!  (a goose approves)\n")
 		case "echo":
@@ -52,6 +53,11 @@ func Run(c *console.Console) {
 			c.WriteString("goroutines " + strconv.Itoa(runtime.NumGoroutine()) +
 				", " + runtime.GOOS + "/" + runtime.GOARCH +
 				", " + runtime.Version() + "\n")
+		case "devices":
+			base, size := board.Memory()
+			c.WriteString("ram @" + strconv.FormatUint(uint64(base), 16) +
+				" " + strconv.FormatUint(uint64(size)>>20, 10) + "MiB, harts " +
+				strconv.Itoa(board.NumCPUs()) + "\n")
 		case "clear":
 			c.WriteString("\x1b[2J\x1b[H")
 		case "halt", "exit", "poweroff":
