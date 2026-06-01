@@ -1,5 +1,7 @@
 # Honk OS 🪿
 
+[![CI](https://github.com/splch/honk/actions/workflows/ci.yml/badge.svg)](https://github.com/splch/honk/actions/workflows/ci.yml)
+
 A small, educational operating system written in **pure Go** for **RISC-V 64-bit**.
 
 Honk OS boots under [OpenSBI](https://github.com/riscv-software-src/opensbi) on
@@ -7,6 +9,9 @@ the QEMU `virt` machine and runs the **standard Go runtime — goroutines,
 channels, and the garbage collector — directly in supervisor mode as the kernel
 itself.** There is no C in the kernel: shell, drivers, and boot logic
 are all Go.
+
+A session looks like this (memory and version figures are illustrative — they
+shift as the GC runs and track the toolchain):
 
 ```
    __         Honk OS
@@ -74,15 +79,21 @@ touch the UART directly.
 | Path | What |
 |------|------|
 | [`cmd/honk`](cmd/honk) | kernel entry — wires the console to the shell |
-| [`kernel/arch/riscv64`](kernel/arch/riscv64) | platform constants, MMIO accessors, poweroff |
+| [`kernel/arch/riscv64`](kernel/arch/riscv64) | platform constants, MMIO accessors, poweroff, the boot device-tree blob |
+| [`kernel/dtb`](kernel/dtb) | device-tree (FDT) parser — discovers console/RAM/harts (host-tested) |
+| [`kernel/device`](kernel/device) | driver registry keyed by device-tree `compatible` string |
+| [`kernel/board`](kernel/board) | per-machine discovery with safe fallbacks (the fork point for new boards) |
 | [`kernel/driver/uart`](kernel/driver/uart) | polled NS16550A UART driver |
+| [`kernel/driver/sbi`](kernel/driver/sbi) | SBI-backed console — board-independent fallback |
 | [`kernel/console`](kernel/console) | line-editing terminal over a byte `Device` |
 | [`kernel/shell`](kernel/shell) | the interactive REPL |
 | [`toolchain`](toolchain) | the vendored runtime patch + `build-toolchain.sh` |
 
-The `arch` / `driver` / `console` / `shell` layering is the seam for growth: new
-hardware slots in as a `driver`, the `console.Device` interface accepts other
-transports, and platform specifics stay in `arch`.
+The `arch` / `board` / `driver` / `console` / `shell` layering is the seam for
+growth: a `board` discovers hardware from the device tree and picks `driver`s by
+their `compatible` string, the `console.Device` interface accepts other
+transports, and platform specifics stay in `arch`. A fork retargets Honk by
+replacing `board` and registering its own drivers — no change to the core.
 
 ## Status
 
