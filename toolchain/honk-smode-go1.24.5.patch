@@ -159,7 +159,7 @@ diff --git a/src/runtime/rt0_noos_riscv64.s b/src/runtime/rt0_noos_riscv64.s
 index 2335542..8337fc0 100644
 --- a/src/runtime/rt0_noos_riscv64.s
 +++ b/src/runtime/rt0_noos_riscv64.s
-@@ -29,6 +29,53 @@ GLOBL runtime·waitInit(SB), NOPTR, $4
+@@ -29,6 +29,54 @@ GLOBL runtime·waitInit(SB), NOPTR, $4
  
  // _rt0_riscv64_noos initializes all running cores
  TEXT _rt0_riscv64_noos(SB),NOSPLIT|NOFRAME,$0
@@ -169,7 +169,8 @@ index 2335542..8337fc0 100644
 +	// Go function honkSmode to prove the Go runtime executes in S-mode (it
 +	// prints via an SBI ecall). The original M-mode bootstrap below is left
 +	// intact for linking but is not reached yet.
-+	MOV    X11, S1               // HONK: save a1 (DTB pointer) before it is clobbered
++	MOV    X11, S2               // HONK: hold a1 (DTB ptr) in S2 across the BSS clear
++	                             // (memclr scratches S1/X9, so S1 would not survive)
 +	CSRCI  ((1<<SIEn), sstatus)  // clear sstatus.SIE (interrupts off)
 +	MOV    $(1<<FSn), S0
 +	CSRS   (s0, sstatus)         // sstatus.FS = Initial (enable FP state)
@@ -188,7 +189,7 @@ index 2335542..8337fc0 100644
 +	CALL  ·memclrNoHeapPointers<ABIInternal>(SB)
 +
 +	// publish the saved DTB pointer now that BSS (which holds it) is cleared
-+	MOV   S1, ·honkDTBPtr(SB)
++	MOV   S2, ·honkDTBPtr(SB)
 +
 +	// g = &harts[0]; set stack bounds and gh/mh links (mirrors the M-mode path)
 +	MOV  $runtime·harts(SB), g
