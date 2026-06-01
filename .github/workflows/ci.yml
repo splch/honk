@@ -91,7 +91,10 @@ jobs:
 
       - name: Boot smoke test (assert the shell, a live GC, and clean poweroff)
         run: |
-          timeout 120 make test | tee boot.log || true
+          # tr -d '\000': OpenSBI's banner contains a NUL byte, which would make grep
+          # treat boot.log as binary and skip line matching; strip it so the asserts
+          # below see plain text.
+          timeout 120 make test | tr -d '\000' | tee boot.log || true
           echo "--- asserting the shell ran, the GC is observably live, and the machine powered off ---"
           grep -q "HONK!" boot.log                                       # honk command
           grep -q "Honk OS (pure Go) riscv64 S-mode/OpenSBI" boot.log    # uname
@@ -113,7 +116,7 @@ jobs:
           # `devices` command reports 64MiB; the no-discovery fallback is the 32MiB
           # default. Asserting 64MiB therefore exercises the whole discovery path
           # end-to-end — something the default-config boot cannot distinguish.
-          timeout 120 make test-discover | tee discover.log || true
+          timeout 120 make test-discover | tr -d '\000' | tee discover.log || true
           echo "--- asserting discovered RAM tracks the QEMU config, not the fallback ---"
           grep -q "ram @80000000 64MiB" discover.log
           grep -q "powering off" discover.log
