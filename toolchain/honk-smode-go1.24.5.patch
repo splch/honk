@@ -88,12 +88,14 @@ new file mode 100644
 index 0000000..5d34bda
 --- /dev/null
 +++ b/src/runtime/honk_noos_riscv64.go
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,39 @@
 +// HONK OS: S-mode bring-up helpers for the noos/riscv64 port.
 +
 +//go:build noos && riscv64
 +
 +package runtime
++
++import _ "unsafe" // for the go:linkname of honkDTBPtr below
 +
 +// honkSmode proves the Go runtime executes in S-mode under OpenSBI: it prints a
 +// line via the SBI legacy console_putchar call. It needs no heap or goroutines,
@@ -118,6 +120,14 @@ index 0000000..5d34bda
 +//
 +//go:nosplit
 +func setSSIP()
++
++// honkDTBPtr is the device tree blob address the firmware passed in a1 at boot.
++// The entry stub (rt0_noos_riscv64.s) saves a1 across BSS-clear and stores it
++// here; package arch/riscv64 aliases it via //go:linkname to discover hardware.
++// It is a uintptr, not a pointer, so the garbage collector never scans it.
++//
++//go:linkname honkDTBPtr
++var honkDTBPtr uintptr
 diff --git a/src/runtime/honk_noos_riscv64.s b/src/runtime/honk_noos_riscv64.s
 new file mode 100644
 index 0000000..60aa48c
@@ -149,7 +159,7 @@ diff --git a/src/runtime/rt0_noos_riscv64.s b/src/runtime/rt0_noos_riscv64.s
 index 2335542..8337fc0 100644
 --- a/src/runtime/rt0_noos_riscv64.s
 +++ b/src/runtime/rt0_noos_riscv64.s
-@@ -29,6 +29,49 @@ GLOBL runtime·waitInit(SB), NOPTR, $4
+@@ -29,6 +29,53 @@ GLOBL runtime·waitInit(SB), NOPTR, $4
  
  // _rt0_riscv64_noos initializes all running cores
  TEXT _rt0_riscv64_noos(SB),NOSPLIT|NOFRAME,$0
@@ -159,6 +169,7 @@ index 2335542..8337fc0 100644
 +	// Go function honkSmode to prove the Go runtime executes in S-mode (it
 +	// prints via an SBI ecall). The original M-mode bootstrap below is left
 +	// intact for linking but is not reached yet.
++	MOV    X11, S1               // HONK: save a1 (DTB pointer) before it is clobbered
 +	CSRCI  ((1<<SIEn), sstatus)  // clear sstatus.SIE (interrupts off)
 +	MOV    $(1<<FSn), S0
 +	CSRS   (s0, sstatus)         // sstatus.FS = Initial (enable FP state)
@@ -175,6 +186,9 @@ index 2335542..8337fc0 100644
 +	MOV   $runtime·ramend(SB), A1
 +	SUB   A0, A1
 +	CALL  ·memclrNoHeapPointers<ABIInternal>(SB)
++
++	// publish the saved DTB pointer now that BSS (which holds it) is cleared
++	MOV   S1, ·honkDTBPtr(SB)
 +
 +	// g = &harts[0]; set stack bounds and gh/mh links (mirrors the M-mode path)
 +	MOV  $runtime·harts(SB), g

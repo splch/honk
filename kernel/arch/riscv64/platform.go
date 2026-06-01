@@ -39,11 +39,11 @@ func Poweroff() {
 }
 
 // dtbPtr is the address of the device tree blob the firmware passed at boot
-// (RISC-V delivers it to the kernel in register a1). It stays 0 until the
-// runtime entry stub preserves a1 across BSS-clear and stores it here. While it
-// is 0, DTB returns nil and the board falls back to its defaults, so the kernel
-// boots either way; capturing the pointer upgrades the board to live discovery.
-var dtbPtr uintptr
+// (RISC-V delivers it to the kernel in register a1). On the noos/riscv64 target
+// the runtime entry stub captures a1 across BSS-clear and publishes it, and this
+// variable aliases it (see dtb_ptr_noos.go); on every other build it stays 0
+// (dtb_ptr_host.go). While it is 0, DTB returns nil and the board falls back to
+// its defaults, so the kernel boots either way.
 
 // DTB returns the device tree blob the firmware passed at boot, sliced to the
 // length in its FDT header, or nil when none was captured. Parsing it (package
