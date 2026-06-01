@@ -90,13 +90,14 @@ transports, and the platform specifics stay in `arch`.
 Working today: boot → full Go runtime (goroutines, channels, GC, maps) in S-mode
 → interactive shell over a UART → clean poweroff.
 
-Roadmap (all "normal" Go on the working runtime now):
+**The vision** — Honk as a minimal, readable, modern successor to xv6 — and the full
+curriculum/feature roadmap are in **[docs/ROADMAP.md](docs/ROADMAP.md)**. The near-term path:
 
-- [ ] Sv39 paging / virtual memory
-- [ ] timer-driven preemptive scheduling (`stimecmp`; the timer interrupt is
-      already wired to the scheduler)
-- [ ] virtio-blk + a simple filesystem
-- [ ] virtio-net + a pure-Go TCP/IP stack
+- [ ] Sv39 paging / virtual memory + a U-mode syscall boundary
+- [ ] user processes (fork / exec / wait)
+- [ ] virtio-blk + a crash-safe filesystem
+- [ ] copy-on-write fork, demand paging, mmap
+- [ ] a scheduler you build · minimal protection · virtio-net capstone
 
 ## Credits & references
 
