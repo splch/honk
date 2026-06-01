@@ -15,7 +15,7 @@ import (
 
 const banner = `
       __      Honk OS
- \ __( .)<    pure Go on RISC-V, supervisor mode under OpenSBI
+ \ __( o)<    pure Go on RISC-V, supervisor mode under OpenSBI
   (  > )      goroutines and a garbage collector are the kernel
   ~~~~~~      type 'help' for commands
 `
