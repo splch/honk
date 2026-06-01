@@ -22,8 +22,8 @@ jobs:
     name: host (fmt · vet · build · test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod # track the Go version in go.mod, no second source of truth
           check-latest: true
@@ -56,14 +56,14 @@ jobs:
     name: kernel build + QEMU boot
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod # bootstrap compiler for building the Embedded Go toolchain
           cache: false # no go.sum / external modules to cache
 
       - name: Cache the patched Embedded Go toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .toolchain
           # Exact-match only (no restore-keys): a toolchain built against an
@@ -83,7 +83,7 @@ jobs:
           make kernel
 
       - name: Upload kernel image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: honk.elf
           path: honk.elf
