@@ -45,10 +45,16 @@ func Poweroff() {
 // (dtb_ptr_host.go). While it is 0, DTB returns nil and the board falls back to
 // its defaults, so the kernel boots either way.
 
-// DTB returns the device tree blob the firmware passed at boot, sliced to the
-// length in its FDT header, or nil when none was captured. Parsing it (package
-// dtb) is how the board discovers the console, RAM, and hart count instead of
-// hardcoding them for one machine.
+// DTB returns a copy of the device tree blob the firmware passed at boot, or nil
+// when none was captured. Parsing it (package dtb) is how the board discovers the
+// console, RAM, and hart count instead of hardcoding them for one machine.
+//
+// The result is copied out of firmware memory on purpose: OpenSBI places the
+// blob high in RAM, inside the region the Go allocator manages (the -M heap
+// arena), so a slice aliasing it could be overwritten once allocation reaches
+// that far. Callers read DTB early (board init, before the heap is used), so the
+// source is still intact; the returned copy then lives in GC-managed memory and
+// stays valid for the life of the parsed tree.
 func DTB() []byte {
 	if dtbPtr == 0 {
 		return nil
@@ -59,5 +65,5 @@ func DTB() []byte {
 		return nil
 	}
 	total := uint32(head[4])<<24 | uint32(head[5])<<16 | uint32(head[6])<<8 | uint32(head[7])
-	return unsafe.Slice((*byte)(unsafe.Pointer(dtbPtr)), total)
+	return append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(dtbPtr)), total)...)
 }
