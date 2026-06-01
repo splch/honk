@@ -89,9 +89,31 @@ jobs:
           path: honk.elf
           if-no-files-found: error
 
-      - name: Boot smoke test (pipe a command session, expect clean poweroff)
+      - name: Boot smoke test (assert the shell, a live GC, and clean poweroff)
         run: |
           timeout 120 make test | tee boot.log || true
-          echo "--- asserting the shell ran and the machine powered off ---"
-          grep -q "HONK!" boot.log
+          echo "--- asserting the shell ran, the GC is observably live, and the machine powered off ---"
+          grep -q "HONK!" boot.log                                       # honk command
+          grep -q "Honk OS (pure Go) riscv64 S-mode/OpenSBI" boot.log    # uname
+          grep -q "noos/riscv64" boot.log                               # stats
+          grep -qE "ram @80000000 [0-9]+MiB, harts [0-9]+" boot.log      # devices
+          grep -q "gc done" boot.log                                    # gc command ran
+          # The GC is actually live: numGC must advance between the two `mem` readings
+          # (one before `gc`, one after). A dead/stub runtime would not move it.
+          nums=$(grep -oE 'numGC [0-9]+' boot.log | grep -oE '[0-9]+')
+          first=$(echo "$nums" | head -1); last=$(echo "$nums" | tail -1)
+          echo "numGC: ${first:-?} -> ${last:-?}"
+          test -n "$first" && test -n "$last" && [ "$last" -gt "$first" ]
           grep -q "powering off" boot.log
+
+      - name: Boot discovery test (alternate RAM config proves device-tree discovery)
+        run: |
+          # Boot the same image with 64 MiB instead of 32. If the boot stub captured
+          # the firmware's device tree pointer (a1) and the parser decoded it, the
+          # `devices` command reports 64MiB; the no-discovery fallback is the 32MiB
+          # default. Asserting 64MiB therefore exercises the whole discovery path
+          # end-to-end — something the default-config boot cannot distinguish.
+          timeout 120 make test-discover | tee discover.log || true
+          echo "--- asserting discovered RAM tracks the QEMU config, not the fallback ---"
+          grep -q "ram @80000000 64MiB" discover.log
+          grep -q "powering off" discover.log
