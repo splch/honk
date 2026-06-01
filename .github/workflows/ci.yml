@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Newer runs supersede in-progress ones for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast checks on a stock Go toolchain. Everything except the final link step
+  # builds and tests on the host, so this gates fmt/vet/build and runs the
+  # kernel/dtb, kernel/board, and kernel/vm unit tests with no QEMU.
+  host:
+    name: host (fmt · vet · build · test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # track the Go version in go.mod, no second source of truth
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l cmd kernel)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        # -unsafeptr=false: the kernel performs integer->pointer MMIO casts on
+        # purpose (kernel/arch/riscv64, kernel/vm). They are correct for bare
+        # metal and are the only thing the unsafeptr analyzer would flag.
+        run: go vet -unsafeptr=false ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test ./...
+
+  # Deeper check: build the patched Embedded Go toolchain, compile the kernel to
+  # a RISC-V ELF, and boot it under QEMU — the only way to catch S-mode asm,
+  # build-tag, and link issues the host cannot. The toolchain is cached because
+  # building it from source takes minutes.
+  kernel:
+    name: kernel build + QEMU boot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # bootstrap compiler for building the Embedded Go toolchain
+
+      - name: Cache the patched Embedded Go toolchain
+        uses: actions/cache@v4
+        with:
+          path: .toolchain
+          # Exact-match only (no restore-keys): a toolchain built against an
+          # older patch must never be reused, because `make toolchain` skips the
+          # rebuild when .toolchain/go/bin/go already exists. Any change under
+          # toolchain/ or to the Go version invalidates the cache.
+          key: honk-toolchain-${{ runner.os }}-${{ hashFiles('toolchain/**', 'go.mod') }}
+
+      - name: Install QEMU (riscv64)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-misc
+
+      - name: Build toolchain (cached) and kernel
+        run: |
+          make toolchain   # idempotent: a no-op when restored from cache
+          make kernel
+
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: honk.elf
+          path: honk.elf
+          if-no-files-found: error
+
+      - name: Boot smoke test (pipe a command session, expect clean poweroff)
+        run: |
+          timeout 120 make test | tee boot.log || true
+          echo "--- asserting the shell ran and the machine powered off ---"
+          grep -q "HONK!" boot.log
+          grep -q "powering off" boot.log

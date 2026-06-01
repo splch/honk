@@ -35,8 +35,8 @@ func TestVPNSplit(t *testing.T) {
 
 func TestMapAndLookup(t *testing.T) {
 	m := NewMapper()
-	m.Map(0x10000000, 0x10000000, Read|Write)        // a device page (no exec, no user)
-	m.Map(0x80200000, 0x81000000, Read|Exec|User)    // a user code page, va != pa
+	m.Map(0x10000000, 0x10000000, Read|Write)     // a device page (no exec, no user)
+	m.Map(0x80200000, 0x81000000, Read|Exec|User) // a user code page, va != pa
 
 	if pte, ok := m.Lookup(0x80200000); !ok {
 		t.Fatal("mapped code page should resolve")
