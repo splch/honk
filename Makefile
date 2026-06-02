@@ -36,6 +36,9 @@ ifeq ($(TARGET),virt)
   TEXT_START  := 0x80210000        # RamStart (0x80200000) + 0x10000, above OpenSBI
   LOADBASE    := 0x8020f000        # TEXT_START - 0x1000: ELF-header page OpenSBI enters
   TAGS        := virt
+  # honk has no RTC; inject the build time so the wall clock is plausible for TLS
+  # (DESIGN.md §15.5). NTP refines it at runtime.
+  LDX         := -X 'github.com/splch/honk/internal/board/virt.buildUnixStr=$(shell date +%s)'
   KERNEL_DEPS := $(BUILD)/$(APP) $(BUILD)/trampoline.bin $(BUILD)/disk.img
   QEMU := qemu-system-riscv64 -machine virt -m 512M -smp 1 -bios default \
           -nographic -monitor none -serial stdio -no-reboot \
@@ -44,10 +47,12 @@ ifeq ($(TARGET),virt)
   QEMU_EXTRA := -device loader,file=$(BUILD)/trampoline.bin,addr=$(LOADBASE) \
                 -drive file=$(BUILD)/disk.img,format=raw,if=none,id=hd0 \
                 -device virtio-blk-device,drive=hd0 \
-                -netdev user,id=net0 -device virtio-net-device,netdev=net0
+                -netdev user,id=net0,hostfwd=tcp:127.0.0.1:8080-:80,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-device,netdev=net0 \
+                -object rng-builtin,id=rng0 -device virtio-rng-device,rng=rng0
 else ifeq ($(TARGET),sifive_u)
   TEXT_START  := 0x80010000        # fu540 ramStart (0x80000000) + 0x10000
   TAGS        := sifive_u,semihosting
+  LDX         :=
   KERNEL_DEPS := $(BUILD)/$(APP) $(BUILD)/qemu.dtb $(BUILD)/bios.bin
   QEMU_EXTRA :=
   QEMU := qemu-system-riscv64 -machine sifive_u -m 512M -nographic -monitor none \
@@ -56,7 +61,7 @@ else
   $(error unknown TARGET '$(TARGET)' — use 'virt' or 'sifive_u')
 endif
 
-GOFLAGS := -tags $(TAGS) -trimpath -ldflags "-T $(TEXT_START) -R 0x1000"
+GOFLAGS := -tags $(TAGS) -trimpath -ldflags "-T $(TEXT_START) -R 0x1000 $(LDX)"
 SRC     := $(shell find . \( -name '*.go' -o -name '*.s' \) -not -path './$(BUILD)/*' 2>/dev/null)
 
 .PHONY: all elf qemu qemu-gdb smoke test vet fmt toolchain check-tamago clean help
@@ -117,9 +122,12 @@ $(BUILD)/trampoline.bin: $(BUILD)/$(APP) boot/virt/trampoline.s | $(BUILD)
 	  -Ttext=$(LOADBASE) boot/virt/trampoline.s -o $(BUILD)/trampoline.elf
 	$(RISCV_OBJCOPY) -O binary $(BUILD)/trampoline.elf $@
 
-# virt-only: a read-only tar image used as the virtio-blk disk.
-$(BUILD)/disk.img: $(wildcard disk/*) | $(BUILD)
-	cd disk && COPYFILE_DISABLE=1 tar -cf ../$@ *
+# virt-only: a blank 64 MiB image for the virtio-blk disk. honk formats it as
+# FAT32 on first boot (seeding a motd) and its contents then persist across
+# reboots (DESIGN.md §15, step 7). Recreated only when missing, so writes survive
+# repeated `make run`; `make clean` resets it.
+$(BUILD)/disk.img: | $(BUILD)
+	dd if=/dev/zero of=$@ bs=1m count=64 2>/dev/null
 
 qemu: $(KERNEL_DEPS)
 	$(QEMU) -kernel $(BUILD)/$(APP) $(QEMU_EXTRA)

@@ -40,7 +40,8 @@ makes the one architectural decision that RV64.md deliberately leaves open.
 12. [Limitations and the hard parts](#12-limitations-and-the-hard-parts)
 13. [Repository skeleton and build](#13-repository-skeleton-and-build)
 14. [Milestones](#14-milestones)
-15. [References](#15-references)
+15. [Toward a daily driver: the next features](#15-toward-a-daily-driver-the-next-features)
+16. [References](#16-references)
 
 ---
 
@@ -496,7 +497,7 @@ through device bringup, then **diverges deliberately** at the process layer (the
 | 7. Timer | Sstc `stimecmp` or SBI `set_timer`; drives `Nanotime`/`Idle` | clint/sbi |
 | 8. PLIC + interrupt-driven UART | `plic`+`uart`+`ring`: RX IRQ wakes wfi, `idle` drains, a console shell goroutine consumes | plic, uart, ring |
 | **9. Processes (U-mode)** | **replaced**: "tasks" = goroutines; isolation (if needed) via GoTEE | application |
-| 10. virtio-blk + FS, then fork/exec | virtio-mmio v2 block driver + read-only tar via stdlib `archive/tar`; **no** fork/exec | virtio |
+| 10. virtio-blk + FS, then fork/exec | virtio-mmio v2 block driver, now read-write with a FAT32 filesystem (step 7; the RO `archive/tar` was the bring-up stage); **no** fork/exec | virtio |
 
 Net effect: steps 5 and 9–10's process machinery evaporate; the rest is RV64.md
 transcribed into idiomatic Go. The "OS" UX is a small shell goroutine (à la
@@ -601,9 +602,209 @@ qemu-system-riscv64 -machine virt -m 128 -smp 1 -bios default \
 | 8 | Upstream the `virt` board package to TamaGo | gives back; widens the RV64 ecosystem |
 | 9 *(stretch)* | SMP via `Task` + HSM; or isolation via GoTEE | only when upstream support and need exist (§12) |
 
+> **Bringup complete (mid-2026).** Milestones 1–7 are implemented and validated
+> in QEMU; honk boots full Go in S-mode, discovers hardware from the DTB, reports
+> faults, idles in `wfi`, enforces W^X, and has an interrupt-driven UART shell, a
+> virtio-blk tar filesystem, and a virtio-net IPv4 (ARP/ICMP) stack — 10 packages,
+> ~2.3 MB. The forward roadmap toward everyday usability is §15.
+
 ---
 
-## 15. References
+## 15. Toward a daily driver: the next features
+
+With RV64.md's bringup done (§11), this section is the forward plan toward
+*everyday usability*. It is grounded in a multi-agent research pass archived under
+`.deep-research/` (run mid-2026; verify load-bearing claims against current
+package state before relying on them). The first job is to define the target
+honestly, because "daily driver" means something specific for a single-address-
+space Go unikernel.
+
+### 15.1 What "daily driver" means here
+
+**Decision: honk's daily-driver target is an SSH-accessible developer / services
+/ edge *appliance* — terminal-first, headless, single address space — not a
+multi-app GUI desktop.** You "use it every day" by SSHing in: a shell, dev tools,
+and self-hosted services (HTTP, git, APIs) run as goroutines; state persists to a
+real filesystem; the network is reachable.
+
+Rationale (research-backed): a unikernel is single-address-space with
+conceptually one application and *no inter-application protection* by design; a
+multi-app GUI desktop would require exactly the process model + hardware
+isolation honk rejected in §1, plus a GUI stack that is **cgo-dead on bare metal**
+(Gio/Ebiten/Fyne all need host GPU/windowing libraries). Every shipped TamaGo
+deployment is narrow single-purpose firmware (GoKey, GoTEE, ArmoredWitness), and
+`gokrazy` — the prominent pure-Go *appliance* platform — deliberately keeps the
+Linux kernel for mature drivers/filesystems. honk's niche is the headless Go
+appliance you administer over SSH, which is a genuine daily driver in the
+workstation/services sense.
+
+### 15.2 Capability taxonomy, and where honk stands
+
+| Tier | Capability | honk status |
+|---|---|---|
+| **0 substrate** | scheduling, memory, interrupt I/O, fault detection | ✅ (Go runtime, Sv39/W^X, PLIC/UART/timer, trap handler) |
+| **1 required** | TCP/IP, DNS, **read/write** filesystem, entropy/CSPRNG, TLS trust, time | ◻ the real gaps (RO tar FS today; no real RNG; no TCP) |
+| **2 daily/remote** | SSH remote login, HTTP services, DHCP, logging | ◻ unlocked by the Tier-1 keystone |
+| **3 optional** | framebuffer GUI, package distribution, SMP, richer app model | mostly **out of scope** by ethos (§15.6) |
+
+### 15.3 The networking keystone
+
+**One dependency lights up almost all of Tier 1–2.** Setting
+`net.SocketFunc = stack.Socket` (the `runtime/goos` net seam, §6) routes the
+*entire* stdlib `net` surface — `net/http`, `crypto/tls`, the DNS resolver,
+`gliderlabs/ssh` — through a pure-Go **gVisor netstack** (`gvisor.dev/gvisor/pkg/
+tcpip` + `adapters/gonet`), with frames crossing via gVisor's `channel.Endpoint`
+(*not* the Linux-only `fdbased`). honk's existing virtio-net driver only has to
+satisfy `usbarmory/go-net`'s 2-method `NetworkDevice` (`Receive`/`Transmit`) and
+keep the 10-byte virtio header it already uses — `tamago-sev-example` wires this
+exact SSH+HTTP stack and independently confirms the `HeaderLength = 10` gotcha
+honk hit. This is the **one place honk accepts a heavy dependency**: gVisor is
+large and GC-heavy (its own reports cite 20–30% CPU on alloc/GC pre-optimization;
+single-hart throughput will be lower still), but it buys a maintained, standards-
+compliant TCP stack instead of a fragile hand-rolled one — the right trade.
+
+### 15.4 Entropy first — the security-critical ordering
+
+**honk has no real entropy, and that silently breaks all crypto.** `crypto/rand`
+and the runtime's ChaCha8 seed both come from the `runtime/goos.GetRandomData`/
+`InitRNG` hooks, which honk currently fills with a *time-seeded splitmix64 stub*
+(flagged insecure in `internal/board/virt/rng.go`). On bare metal there is no OS
+to supply a seed, so a weak seed compromises every TLS key, nonce, and hash seed
+— catastrophically and invisibly. **Before any SSH host key or TLS, replace the
+stub with a real source: a virtio-rng driver** (reuse honk's split-virtqueue
+plumbing; QEMU's entropy device draws from the host CSPRNG). RDRAND is x86-only;
+the RISC-V `Zkr` seed CSR is M-mode-gated and absent on QEMU `virt`. This step is
+small but **must precede the network keystone's SSH/TLS**.
+
+### 15.5 The phased roadmap
+
+Each step adds one Go package along an existing seam, preserves the single-
+address-space ethos, and is gated by a one-line `GOOS=tamago go build` viability
+check (several attractive packages secretly pull `x/sys/unix`, cgo, or
+`syscall.SYS_IOCTL` and will not build — verify before committing).
+
+| # | Feature | Go package(s) | Integration seam | Size / risk |
+|---|---|---|---|---|
+| **1 ✅** | **Secure entropy** | virtio-rng (`internal/virtio/rng.go`) | seeds `runtime/goos.GetRandomData`; `crypto/rand`→`sysrand`→here | tiny / done |
+| **2 ✅** | **TCP/IP keystone** | `gvisor.dev/gvisor` + `usbarmory/go-net` | virtio-net → `NetworkDevice` adapter; `net.SocketFunc = iface.Stack.Socket` | +3.8 MB / done |
+| **3 ✅** | **TLS trust** | `golang.org/x/crypto/x509roots/fallback` | blank import → `x509.SetFallbackRoots` | +~1 MB / done |
+| **4 ✅** | **SSH shell** | `gliderlabs/ssh` + `golang.org/x/term` | shared `runCmd(io.Writer,…)` over UART + SSH; ed25519 host key from `crypto/rand` | +1 MB / done |
+| **5 ✅** | **DNS · NTP** (DHCP deferred) | custom `net.Resolver` · `beevik/ntp` · build-time clock floor | resolver `Dial`→10.0.2.3:53; `ntp.Query`→`SetWallClock`; `-ldflags -X` build epoch | small / done |
+| **6 ✅** | **HTTP services** | stdlib `net/http` | free once the keystone is up | +3.9 MB / done |
+| **7 ✅** | **R/W filesystem** | `diskfs/go-diskfs` `filesystem/fat32` over a virtio-blk backend | `WriteAt` (RMW) on the block driver; `backend.Storage` adapter; format-on-first-boot; `ls`/`cat`/`write` | done — writable FAT32 replaces the RO tar |
+| **8** *(stretch)* | **Sandboxed apps** | `tetratelabs/wazero` | host-module capabilities; goroutines stay the default for trusted code | medium / medium (riscv64 interpreter-only, ~10× slower; tamago build unverified) |
+
+Step 2 is the keystone (it unlocks 3–6); step 1 must land before it. Steps 5–7
+are independent and small. DNS is *broken by default* (no `/etc/resolv.conf`), so
+inject one into the in-memory FS or wire a custom resolver — it is a `MUST` per
+RFC 1123, not optional.
+
+> **Step 1 done (mid-2026).** `internal/virtio/rng.go` drives the virtio entropy
+> device; `initEntropy()` runs first in `hwinit1` and installs it as the source
+> for `runtime/goos.GetRandomData`, which is exactly where tamago's
+> `crypto/internal/sysrand` (hence `crypto/rand`) draws from — verified live:
+> `crypto/rand.Read` now returns host-CSPRNG entropy (the `rand` shell command),
+> replacing the time-seeded stub. SSH/TLS keys are now safe to generate.
+
+> **Steps 2 + 6 done (mid-2026).** gVisor's netstack **builds under
+> `GOOS=tamago/riscv64`** — the keystone is viable. honk's virtio-net satisfies
+> `go-net`'s 2-method `NetworkDevice` via a tiny adapter, and the stack is brought
+> up from a package `init()` in `netstack.go` (*not* `hwinit1` — gVisor needs its
+> own package inits to run first; calling it from `hwinit1` faults on nil
+> globals, same lesson as the ring). `net.SocketFunc = iface.Stack.Socket` then
+> routes all stdlib `net` through it. **Verified live:** a stdlib `net/http`
+> server on honk is reachable from the host (`curl` via a QEMU `hostfwd` returns
+> "honk! … served over gVisor netstack"). Binary: 2.3 → 6.1 MB (gVisor + go-net)
+> → 10 MB (adding `net/http`) — the anticipated "small" tradeoff; gVisor is the
+> one accepted heavy dep and `net/http` the other large stdlib pull. The
+> keystone now unblocks TLS roots (3), SSH (4), and DNS/NTP (5).
+
+> **Step 4 done (mid-2026).** `gliderlabs/ssh` + `golang.org/x/crypto` +
+> `golang.org/x/term` build under `GOOS=tamago/riscv64`. honk runs an SSH server
+> on `:22` with an ed25519 host key generated from the now-secure `crypto/rand`
+> (step 1). The shell was refactored to a shared `runCmd(io.Writer, line)` so the
+> same `help`/`ls`/`cat`/`net`/`rand` commands serve both the local UART console
+> and remote SSH sessions (exec *and* interactive via `x/term`). **Verified
+> live:** `ssh -p 2222 honk@127.0.0.1 ls|cat motd|net|rand` from the host returns
+> the expected output — this is the daily-driver remote-login UX. Auth is open in
+> the demo; production needs a `PublicKeyHandler`. Binary ~11 MB.
+
+> **Step 7 done (mid-2026)** — honk has a **writable, persistent filesystem.**
+> The virtio-blk driver gained `WriteAt` (read-modify-write for sub-sector
+> writes); a `backend.Storage` adapter (fs.go) exposes the device to
+> `diskfs/go-diskfs`'s pure-Go `filesystem/fat32`, which **builds under
+> `GOOS=tamago`**. On first boot honk formats a blank image as FAT32 and seeds a
+> `motd`; thereafter it mounts the existing FS. The shell gained `write <file>
+> <text>` alongside `ls`/`cat`, all serialized by a mutex (the FAT driver and the
+> single DMA buffer are not concurrency-safe). **Verified:** writing a file, then
+> rebooting QEMU on the same image, the file and its contents survive — and the
+> image is a standard FAT32 that the host can mount. The mount runs from a package
+> `init()`, not `hwinit1`: go-diskfs uses `defer`, which faults on the system
+> stack (the same lesson as gVisor). The 64 MiB image keeps FAT32 host-mountable;
+> binary ~12 MB.
+
+> **Steps 3 + 5 done (mid-2026)** — honk now makes **outbound TLS** connections.
+> Blank-importing `golang.org/x/crypto/x509roots/fallback` installs the Mozilla CA
+> roots via `crypto/x509.SetFallbackRoots`. `net.DefaultResolver` is pointed at
+> SLIRP's DNS (`10.0.2.3:53`) since a unikernel has no `/etc/resolv.conf`. honk
+> has no RTC, and on tamago `walltime` derives from the monotonic `nanotime`, so
+> the clock is **seeded once at boot from the build time** (injected via
+> `-ldflags -X`, applied in `hwinit1` *before* gVisor's timers exist — a
+> decade-scale jump would disturb TCP timers); `beevik/ntp` then refines it with a
+> small step over gVisor UDP. **Verified live over SSH:** `date` ≈ now,
+> `fetch http://example.com` and `fetch https://example.com` both return `200`
+> (DNS + TCP + full TLS cert verification), and `ntp` sets the clock from
+> `pool.ntp.org`. **DHCP is deferred:** honk uses static SLIRP addressing; a real
+> network would need a hand-rolled DHCP client. Binary ~12 MB.
+
+### 15.6 What stays out, and why (ethos guard)
+
+- **A multi-process / POSIX kernel** — rejected in §1; goroutines are the tasks.
+- **Native GUI toolkits** (Gio/Ebiten/Fyne) — need cgo + a host GPU/windowing
+  stack that does not exist on `virt`; and there is no mature pure-Go virtio-gpu
+  driver. Terminal-first over SSH (`golang.org/x/term`) instead; full-screen TUIs
+  (bubbletea/tcell) are an unverified opt-in (they tend to need `x/sys/unix`).
+- **Go `plugin`** — `dlopen`-based, Linux/macOS/FreeBSD only; cannot build under
+  `GOOS=tamago`. Extensibility is blank-imported packages or wazero.
+- **GoTEE** — real PMP/U-mode isolation, but it reintroduces the M-mode firmware
+  / privilege split honk shed (it replaces OpenSBI and targets `sifive_u`).
+  Reserve as an opt-in only if untrusted-code hardware isolation becomes a hard
+  requirement; otherwise wazero gives software isolation without the split.
+- **ext4 write / littlefs** — ext4 is read-only in pure Go; littlefs is cgo.
+
+### 15.7 Cross-cutting risks to track
+
+- **One hart, no async preemption** (TamaGo SMP is amd64-only): a CPU-bound
+  goroutine can starve the SSH shell, the net poller, and the timer. Keep work
+  cooperative; this is the sharpest daily-use hazard.
+- **The netstack poller busy-spins** (introduced with step 2; **fixed**):
+  `go-net`'s `Interface.Start` polled the NIC with `runtime.Gosched()` when idle,
+  so it was always runnable — the scheduler never reached `goos.Idle`, defeating
+  the timer step's `wfi` low-power idle (honk pegged the hart, measured ~67% host
+  CPU while otherwise idle). honk now runs its own `rxLoop` (netstack.go) over
+  go-net's exported `NetworkDevice`/`Stack` seam: it drains every available frame
+  then sleeps with an exponential backoff (250 µs → 10 ms), so bursts never sleep
+  and a quiet link wakes only ~100×/s. Idle host CPU dropped to **~1%** with no
+  interactive-latency regression (transmit was already event-driven via the
+  stack's write-notify callback). Fixing this also surfaced and fixed a latent
+  bug: `idle` armed the SBI timer from `nanotime()`, which step 5 had given a
+  ~2026 `wallOffset`; the deadline must be converted back to raw timebase ticks
+  (`timerTicks`, time.go) or `wfi` never wakes — the busy-poll had masked it by
+  never idling. *Future:* true interrupt-driven RX (virtio `InterruptACK` + a PLIC
+  net source + `runtime.Wake` from `idle`, as the deprecated tamago seam allows)
+  would take idle wakeups to zero, at the cost of waking a goroutine from the g0
+  idle context — deferred as not worth the risk for the appliance's traffic.
+- **Binary/heap growth** from gVisor is real and unmeasured — the central tension
+  with "small." Measure the image after each step; the keystone is the *one*
+  accepted heavy dependency, and everything else stays light.
+- **`GOOS=tamago` build traps**: cgo, `x/sys/unix`, and ioctl-based terminal
+  control. Gate every new dependency on the build check above.
+- **Licensing** is clean: the recommended stack is permissive (MIT/Apache-2.0/
+  BSD); trim the embedded CA roots to what honk actually needs.
+
+---
+
+## 16. References
 
 **This project's siblings**
 
@@ -637,6 +838,22 @@ qemu-system-riscv64 -machine virt -m 128 -smp 1 -bios default \
 - QEMU `virt` machine docs (auto-DTB, virtio, boot flow); OpenSBI `qemu_virt`
   platform docs; RISC-V SBI specification (v2.0 / v3.0); RISC-V Privileged ISA
   (Sv39, traps, CSRs) — all as cited throughout RV64.md.
+
+**Daily-driver roadmap (§15)** — from the archived research pass under
+`.deep-research/` (AI-generated; verify before relying on it). Primary anchors:
+
+- `usbarmory/go-net` (gVisor `channel.Endpoint` + `gonet` adapters + the
+  `NetworkDevice` interface) and `usbarmory/tamago-sev-example` (`net.SocketFunc`
+  wiring, SSH+HTTP, the `HeaderLength = 10` virtio confirmation).
+- gVisor netstack (`gvisor.dev/gvisor/pkg/tcpip`) docs and performance notes.
+- `diskfs/go-diskfs` (`filesystem/fat32`), `spf13/afero`, stdlib `io/fs`.
+- `tetratelabs/wazero` (sandboxed apps; riscv64 interpreter-only).
+- `golang.org/x/crypto/x509roots/fallback`, `gliderlabs/ssh`,
+  `golang.org/x/term`, `github.com/beevik/ntp`.
+- The Go secure-randomness blog (`go.dev/blog/chacha8rand`) on why entropy is
+  the OS's job; RFC 1123 (STD 3) for the MUST/SHOULD host-requirement vocabulary.
+- `gokrazy` (pure-Go appliances that keep the Linux kernel) — the
+  daily-driver-scope reality check.
 
 > The single biggest risk is dependency health: honk lives or dies by TamaGo
 > tracking Go. Pin the toolchain version, keep the seam upstream-shaped, and

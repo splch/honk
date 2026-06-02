@@ -55,7 +55,6 @@ internal/plic/       # PLIC interrupt-controller driver
 internal/virtio/     # virtio-mmio v2 block + net drivers
 internal/inet/       # tiny IPv4 stack: Ethernet/ARP/IPv4/ICMP (host-tested)
 internal/board/virt/ # S-mode-under-OpenSBI board: runtime seam, trap, vm, console, disk, net
-disk/                # demo files tarred into the virtio-blk image
 boot/virt/           # 20-byte load-base trampoline (trampoline.s)
 boot/sifive_u/       # Phase 0 trampoline BIOS (bios.s + bios.ld)
 Makefile             # toolchain + build + qemu + smoke + test (TARGET=virt|sifive_u)
@@ -79,13 +78,26 @@ handler that reports faults (`scause`/`sepc`/`stval`) and halts, idles the hart
 in `wfi` between timer deadlines (no busy-poll), and runs under an
 **identity-mapped Sv39 page table enforcing W^X** (kernel text `R|X`, all else
 `R|W`-no-exec, A/D preset). It owns the **NS16550A UART** for interrupt-driven
-input driving a tiny **shell** (`help`, `ls`, `cat <file>`) at the `honk>`
-prompt: a keystroke raises a PLIC interrupt that wakes the hart from `wfi`,
-`idle` drains it into a lock-free ring, and a console goroutine runs commands.
-`ls`/`cat` read a **virtio-blk** disk parsed as a read-only filesystem with the
-Go stdlib `archive/tar`, and a **virtio-net** driver + a tiny IPv4 stack
-(`internal/inet`) ARP and ping the QEMU gateway (the `net` command). Pure Go plus
-~180 lines of assembly, ~2.3 MB.
+input driving a tiny **shell** (`help`, `ls`, `cat <file>`, `write <file>
+<text>`) at the `honk>` prompt: a keystroke raises a PLIC interrupt that wakes
+the hart from `wfi`, `idle` drains it into a lock-free ring, and a console
+goroutine runs commands. `ls`/`cat`/`write` use a **writable FAT32 filesystem**
+(`diskfs/go-diskfs`) on a **virtio-blk** disk — honk formats a blank image on
+first boot, and files written there **persist across reboots** (and the image
+mounts on the host). The `net`/`rand` commands ARP+ping the gateway
+(`internal/inet`) and read `crypto/rand` (seeded by a **virtio-rng** entropy
+source).
+
+Toward a daily driver (DESIGN.md §15), honk now runs a full **gVisor TCP/IP
+stack**: setting `net.SocketFunc` routes all of stdlib `net` through it, so a
+plain `net/http` server on honk is reachable from your machine
+(`curl http://127.0.0.1:8080/`), and you can **`ssh` in** to the `honk>` shell
+(`ssh -p 2222 honk@127.0.0.1` — `gliderlabs/ssh`, ed25519 host key from
+`crypto/rand`). It also makes **outbound TLS** connections: the shell's
+`fetch https://example.com` resolves DNS, dials over the stack, and verifies the
+certificate against embedded Mozilla roots; `ntp` syncs the clock, `date` shows
+it. Core honk is ~2.3 MB; the full networked build (gVisor + `net/http` + SSH +
+TLS roots) is ~12 MB.
 
 **Phase 0** — also runs on QEMU `sifive_u` (M-mode trampoline; the existing
 TamaGo RISC-V port), kept as a second board to keep the driver boundaries honest.

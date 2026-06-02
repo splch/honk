@@ -3,6 +3,9 @@
 package virt
 
 import (
+	crand "crypto/rand"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 	_ "unsafe"
@@ -100,7 +103,7 @@ func console() {
 		switch b {
 		case '\r', '\n':
 			puts("\r\n")
-			run(strings.TrimSpace(string(line)))
+			runCmd(uart0, strings.TrimSpace(string(line)))
 			line = line[:0]
 			puts("honk> ")
 		case 0x7f, 0x08: // DEL / backspace
@@ -115,39 +118,75 @@ func console() {
 	}
 }
 
-// run executes one shell command line.
-func run(cmd string) {
+// runCmd executes one shell command line, writing all output to w. The same
+// runner backs both the local UART console and remote SSH sessions, so output
+// is destination-agnostic (DESIGN.md §15.1).
+func runCmd(w io.Writer, cmd string) {
 	switch {
 	case cmd == "":
 	case cmd == "help":
-		puts("commands: help, ls, cat <file>, net\r\n")
+		io.WriteString(w, "commands: help, ls, cat <file>, write <file> <text>, net, date, ntp, fetch <url>, rand\r\n")
 	case cmd == "net":
-		netCmd()
-	case cmd == "ls":
-		if Disk == nil {
-			puts("no disk\r\n")
+		netCmd(w)
+	case cmd == "date":
+		fmt.Fprintf(w, "%s\r\n", time.Now().UTC().Format(time.RFC3339))
+	case cmd == "ntp":
+		t, err := ntpSync("pool.ntp.org")
+		if err != nil {
+			fmt.Fprintf(w, "ntp: %v\r\n", err)
 			return
 		}
-		listDisk()
+		fmt.Fprintf(w, "ntp: clock set to %s\r\n", t.UTC().Format(time.RFC3339))
+	case strings.HasPrefix(cmd, "fetch "):
+		fetchURL(w, strings.TrimSpace(cmd[len("fetch "):]))
+	case cmd == "rand":
+		var b [16]byte
+		crand.Read(b[:]) // crypto/rand -> getRandomData -> virtio-rng
+		fmt.Fprintf(w, "rand: %x\r\n", b)
+	case cmd == "ls":
+		if FS == nil {
+			io.WriteString(w, "no disk\r\n")
+			return
+		}
+		listDisk(w)
 	case strings.HasPrefix(cmd, "cat "):
-		if Disk == nil {
-			puts("no disk\r\n")
+		if FS == nil {
+			io.WriteString(w, "no disk\r\n")
 			return
 		}
 		data, err := ReadFile(strings.TrimSpace(cmd[len("cat "):]))
 		if err != nil {
-			puts("no such file\r\n")
+			io.WriteString(w, "no such file\r\n")
 			return
 		}
-		for _, c := range data {
-			if c == '\n' {
-				uart0.Tx('\r')
-			}
-			uart0.Tx(c)
+		writeText(w, data)
+	case strings.HasPrefix(cmd, "write "):
+		if FS == nil {
+			io.WriteString(w, "no disk\r\n")
+			return
 		}
+		name, text, ok := strings.Cut(strings.TrimSpace(cmd[len("write "):]), " ")
+		if !ok || name == "" {
+			io.WriteString(w, "usage: write <file> <text>\r\n")
+			return
+		}
+		if err := WriteFile(name, []byte(text+"\n")); err != nil {
+			fmt.Fprintf(w, "write failed: %v\r\n", err)
+			return
+		}
+		fmt.Fprintf(w, "wrote %d bytes to %s\r\n", len(text)+1, name)
 	default:
-		puts("unknown command: ")
-		puts(cmd)
-		puts("\r\n")
+		fmt.Fprintf(w, "unknown command: %s\r\n", cmd)
+	}
+}
+
+// writeText writes data to a raw terminal, translating bare \n to \r\n.
+func writeText(w io.Writer, data []byte) {
+	for _, c := range data {
+		if c == '\n' {
+			w.Write([]byte{'\r', '\n'})
+			continue
+		}
+		w.Write([]byte{c})
 	}
 }

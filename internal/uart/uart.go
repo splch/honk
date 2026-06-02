@@ -46,6 +46,15 @@ func (u *UART) Tx(c byte) {
 	mmio.W8(u.base+thr, c)
 }
 
+// Write writes p to the UART, satisfying io.Writer so the UART console and an
+// SSH session can share one command runner.
+func (u *UART) Write(p []byte) (int, error) {
+	for _, c := range p {
+		u.Tx(c)
+	}
+	return len(p), nil
+}
+
 // Rx returns the next received byte, or ok=false if the RX FIFO is empty.
 func (u *UART) Rx() (byte, bool) {
 	if mmio.R8(u.base+lsr)&lsrDR == 0 {

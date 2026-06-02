@@ -69,9 +69,14 @@ func hwinit1() {
 	goos.Idle = idle
 	probe()
 	enablePaging() // Sv39 identity map with W^X (RV64.md Part 5, DESIGN.md §9)
+	initClock()    // seed the wall clock from build time, before any timers (DESIGN.md §15.5)
+	initEntropy()  // virtio-rng FIRST: seed crypto/rand before any key (DESIGN.md §15.4)
 	initConsole()  // take over the NS16550A UART (RV64.md Part 7.3)
-	initDisk()     // mount a virtio-blk disk if attached (RV64.md Part 7.4)
 	initNet()      // bring up a virtio-net device if attached (RV64.md Part 7.4)
+	// The FAT32 disk mount (disk.go) and the gVisor TCP/IP stack (netstack.go) come
+	// up from package init()s, not here: hwinit1 runs on the system stack, where
+	// defer — used throughout go-diskfs and gVisor — is forbidden, and before
+	// package-level init()s their own packages need (DESIGN.md §15.3).
 }
 
 const maxInt64 = 1<<63 - 1
@@ -92,7 +97,7 @@ func idle(until int64) {
 		if until <= nanotime() {
 			return // the deadline has passed; a goroutine is ready to run
 		}
-		sbi.SetTimer(uint64(until) / nsPerTick) // wake at the deadline
+		sbi.SetTimer(timerTicks(until)) // wake at the deadline (raw timer ticks)
 	}
 	wfi() // woken by the timer (if armed) or by UART input
 }

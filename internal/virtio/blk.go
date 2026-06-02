@@ -2,10 +2,9 @@
 
 // Package virtio implements a minimal virtio-mmio v2 block driver (RV64.md
 // §7.4): the device handshake, one split virtqueue, and synchronous polled
-// sector reads exposed as io.ReaderAt. It is read-only and single-request — just
-// enough to mount a read-only image — and relies on honk's identity map so a
-// page-aligned Go allocation's virtual address is also its physical (DMA)
-// address.
+// sector I/O exposed as io.ReaderAt and io.WriterAt. It is single-request and
+// relies on honk's identity map so a page-aligned Go allocation's virtual
+// address is also its physical (DMA) address.
 package virtio
 
 import (
@@ -51,6 +50,7 @@ const (
 	descWrite = 2 // device writes this buffer
 
 	blkTypeIn  = 0   // read
+	blkTypeOut = 1   // write
 	SectorSize = 512 // bytes
 	queueSize  = 8   // descriptors per queue (power of two)
 	pageSize   = 4096
@@ -231,6 +231,63 @@ func (b *Block) ReadAt(p []byte, off int64) (int, error) {
 			return n, err
 		}
 		n += copy(p[n:], b.data[pos%SectorSize:])
+	}
+	return n, nil
+}
+
+// writeSector writes b.data to one 512-byte sector via header (device reads) ->
+// data (device reads) -> status (device writes).
+func (b *Block) writeSector(sector uint64) error {
+	b.hdr.Type = blkTypeOut
+	b.hdr.Reserved = 0
+	b.hdr.Sector = sector
+	*b.status = 0xff // device sets 0 on success
+
+	b.desc[0] = virtqDesc{Addr: b.hdrPA, Len: 16, Flags: descNext, Next: 1}
+	b.desc[1] = virtqDesc{Addr: b.dataPA, Len: SectorSize, Flags: descNext, Next: 2} // device reads
+	b.desc[2] = virtqDesc{Addr: b.statusPA, Len: 1, Flags: descWrite, Next: 0}
+
+	b.avail.Ring[b.avail.Idx%queueSize] = 0
+	mmio.Fence()
+	b.avail.Idx++
+	mmio.Fence()
+	mmio.W32(b.base+regQueueNotify, 0)
+
+	for mmio.R16(b.usedIdxPA) == b.lastUsed {
+	}
+	b.lastUsed++
+	mmio.Fence()
+
+	if mmio.R8(uintptr(b.statusPA)) != 0 {
+		return errors.New("virtio: block write failed")
+	}
+	return nil
+}
+
+// WriteAt implements io.WriterAt over the device. Sub-sector writes do a
+// read-modify-write so the rest of the touched sector is preserved.
+func (b *Block) WriteAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errors.New("virtio: negative offset")
+	}
+	n := 0
+	for n < len(p) {
+		pos := off + int64(n)
+		if pos >= b.Size() {
+			return n, errors.New("EOF")
+		}
+		sector := uint64(pos / SectorSize)
+		within := int(pos % SectorSize)
+		if within != 0 || len(p)-n < SectorSize { // partial sector: preserve the rest
+			if err := b.readSector(sector); err != nil {
+				return n, err
+			}
+		}
+		m := copy(b.data[within:], p[n:])
+		if err := b.writeSector(sector); err != nil {
+			return n, err
+		}
+		n += m
 	}
 	return n, nil
 }
