@@ -6,7 +6,6 @@ import (
 	"errors"
 	"unsafe"
 
-	"github.com/splch/honk/internal/inet"
 	"github.com/splch/honk/internal/mmio"
 )
 
@@ -57,7 +56,7 @@ type Net struct {
 	txBuf   []byte
 	txBufPA uint64
 
-	mac inet.MAC
+	mac [6]byte
 }
 
 // IsNet reports whether the mmio slot at base is a virtio network device.
@@ -117,8 +116,9 @@ func NewNet(base uintptr) (*Net, error) {
 	return n, nil
 }
 
-// MAC returns the device's hardware address.
-func (n *Net) MAC() inet.MAC { return n.mac }
+// MAC returns the device's 6-byte hardware address; callers wrap it in
+// net.HardwareAddr to format or hand to the stack.
+func (n *Net) MAC() [6]byte { return n.mac }
 
 func (n *Net) setupQueue(idx uint32, q *vq) {
 	b := n.base

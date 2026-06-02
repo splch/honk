@@ -52,8 +52,7 @@ internal/sbi/        # SBI firmware ecall wrappers
 internal/mmio/       # volatile MMIO accessors (asm)
 internal/uart/       # NS16550A driver
 internal/plic/       # PLIC interrupt-controller driver
-internal/virtio/     # virtio-mmio v2 block + net drivers
-internal/inet/       # tiny IPv4 stack: Ethernet/ARP/IPv4/ICMP (host-tested)
+internal/virtio/     # virtio-mmio v2 block + net + entropy drivers
 internal/board/virt/ # S-mode-under-OpenSBI board: runtime seam, trap, vm, console, disk, net
 boot/virt/           # 20-byte load-base trampoline (trampoline.s)
 boot/sifive_u/       # Phase 0 trampoline BIOS (bios.s + bios.ld)
@@ -84,9 +83,10 @@ the hart from `wfi`, `idle` drains it into a lock-free ring, and a console
 goroutine runs commands. `ls`/`cat`/`write` use a **writable FAT32 filesystem**
 (`diskfs/go-diskfs`) on a **virtio-blk** disk — honk formats a blank image on
 first boot, and files written there **persist across reboots** (and the image
-mounts on the host). The `net`/`rand` commands ARP+ping the gateway
-(`internal/inet`) and read `crypto/rand` (seeded by a **virtio-rng** entropy
-source).
+mounts on the host). The `net` command resolves a hostname over the network
+(exercising the NIC → TCP/IP stack → DNS path) and `rand` reads `crypto/rand`
+(seeded by a **virtio-rng** entropy source). IPv4/ARP/ICMP are handled by the
+gVisor stack below, so honk carries no hand-rolled IP stack.
 
 Toward a daily driver (DESIGN.md §15), honk now runs a full **gVisor TCP/IP
 stack**: setting `net.SocketFunc` routes all of stdlib `net` through it, so a

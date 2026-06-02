@@ -3,24 +3,22 @@
 package virt
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net"
 	"time"
 
-	"github.com/splch/honk/internal/inet"
 	"github.com/splch/honk/internal/virtio"
 )
 
 // QEMU user-mode networking (-netdev user) defaults: the guest is 10.0.2.15 and
-// the gateway/NAT is 10.0.2.2, which answers ARP and ICMP. honk uses static
-// addressing (no DHCP).
-var (
-	hostIP    = inet.IP{10, 0, 2, 15}
-	gatewayIP = inet.IP{10, 0, 2, 2}
-	net0      *virtio.Net
-	pingID    uint16 = 0x484b // "HK"
-)
+// the gateway/NAT is 10.0.2.2. honk uses static addressing (no DHCP).
+var net0 *virtio.Net
 
 // initNet finds and initializes a virtio-net device, logging its MAC. Called
-// from hwinit1 after paging maps the virtio MMIO.
+// from hwinit1 after paging maps the virtio MMIO. The gVisor TCP/IP stack is
+// then brought up over it from a package init() (netstack.go).
 func initNet() {
 	for i := uintptr(0); i < 8; i++ {
 		base := uintptr(virtioBase) + i*0x1000
@@ -40,73 +38,31 @@ func initNet() {
 	if net0 == nil {
 		return
 	}
+	mac := net0.MAC()
 	puts("honk/virt: net up, MAC ")
-	printMAC(net0.MAC())
+	puts(net.HardwareAddr(mac[:]).String())
 	puts(", IP 10.0.2.15\n")
 }
 
-// netCmd is the `net` shell command: it ARPs for the gateway and pings it,
-// exercising virtio-net transmit and receive end to end.
-func netCmd() {
+// netCmd is the `net` shell command. It reports the interface and proves the
+// whole NIC → gVisor → UDP → DNS path by resolving a name through the stack
+// honk already runs (netstack.go). The old hand-rolled ARP/ICMP ping is gone:
+// gVisor handles ARP/IPv4/ICMP, and reading frames directly here would race the
+// stack's own rxLoop for the NIC.
+func netCmd(w io.Writer) {
 	if net0 == nil {
-		puts("no net device\r\n")
+		io.WriteString(w, "no net device\r\n")
 		return
 	}
-	net0.Send(inet.ARPRequest(net0.MAC(), hostIP, gatewayIP))
-	gwMAC, ok := awaitARP(gatewayIP)
-	if !ok {
-		puts("net: no ARP reply from gateway\r\n")
+	mac := net0.MAC()
+	fmt.Fprintf(w, "net: MAC %s, IP 10.0.2.15/24, gateway 10.0.2.2\r\n", net.HardwareAddr(mac[:]))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupHost(ctx, "example.com")
+	if err != nil {
+		fmt.Fprintf(w, "net: DNS lookup failed: %v\r\n", err)
 		return
 	}
-	puts("net: gateway 10.0.2.2 is at ")
-	printMAC(gwMAC)
-	puts("\r\n")
-
-	net0.Send(inet.ICMPEcho(net0.MAC(), gwMAC, hostIP, gatewayIP, pingID, 1, []byte("honk")))
-	if awaitPing(pingID) {
-		puts("net: ping 10.0.2.2: reply received\r\n")
-	} else {
-		puts("net: ping 10.0.2.2: no reply\r\n")
-	}
-}
-
-// awaitARP polls received frames for an ARP reply from ip (~200 ms timeout).
-func awaitARP(ip inet.IP) (inet.MAC, bool) {
-	for try := 0; try < 200; try++ {
-		f, ok := net0.Recv()
-		if !ok {
-			time.Sleep(time.Millisecond)
-			continue
-		}
-		if mac, sip, ok := inet.ParseARPReply(f); ok && sip == ip {
-			return mac, true
-		}
-	}
-	return inet.MAC{}, false
-}
-
-// awaitPing polls received frames for an ICMP echo reply with the given id.
-func awaitPing(id uint16) bool {
-	for try := 0; try < 200; try++ {
-		f, ok := net0.Recv()
-		if !ok {
-			time.Sleep(time.Millisecond)
-			continue
-		}
-		if rid, _, ok := inet.ParseICMPEchoReply(f); ok && rid == id {
-			return true
-		}
-	}
-	return false
-}
-
-func printMAC(m inet.MAC) {
-	const hex = "0123456789abcdef"
-	for i, b := range m {
-		if i > 0 {
-			uart0.Tx(':')
-		}
-		uart0.Tx(hex[b>>4])
-		uart0.Tx(hex[b&0xf])
-	}
+	fmt.Fprintf(w, "net: resolved example.com -> %v (NIC+gVisor+DNS ok)\r\n", addrs)
 }

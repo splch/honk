@@ -505,8 +505,9 @@ transcribed into idiomatic Go. The "OS" UX is a small shell goroutine (à la
 
 > **Status (§14).** All bringup steps are implemented and validated in QEMU
 > (`make smoke TARGET=virt`): 1–8, 10 (virtio-blk + tar FS), and a **virtio-net**
-> driver with a tiny IPv4 stack (`internal/inet`) that ARPs and pings the QEMU
-> gateway. Step 9 is goroutines by design. Implementation note: step 8's
+> driver with a tiny IPv4 stack that ARPed and pinged the QEMU gateway (the
+> bring-up `internal/inet`, since removed once the gVisor stack of §15.3 subsumed
+> ARP/IPv4/ICMP). Step 9 is goroutines by design. Implementation note: step 8's
 > interrupt model is the `wfi`-masked-wake + `idle`-drain of §8, not a resumable
 > `os/signal` ISR. **Deliberately not built:** a full TCP stack for stdlib
 > `net`/`net/http` — the realistic option is gVisor's netstack behind

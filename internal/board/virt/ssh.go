@@ -55,18 +55,6 @@ func sshSession(s ssh.Session) {
 	}
 
 	t := term.NewTerminal(s, "honk> ")
-	io.WriteString(t, "honk over SSH. commands: help, ls, cat <file>, net, rand. 'exit' to quit.\r\n")
-	for {
-		line, err := t.ReadLine()
-		if err != nil {
-			return
-		}
-		switch line = strings.TrimSpace(line); line {
-		case "":
-		case "exit", "quit":
-			return
-		default:
-			runCmd(t, line)
-		}
-	}
+	io.WriteString(t, "honk over SSH. type 'help'; 'exit' to quit.\r\n")
+	shellLoop(t, true) // shared line editor + dispatch with the UART console
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/splch/honk/internal/ring"
 	"github.com/splch/honk/internal/sbi"
 	"github.com/splch/honk/internal/uart"
+	"golang.org/x/term"
 )
 
 // virt device MMIO (RV64.md Appendix A). TODO(phase1+): read these from the DTB
@@ -87,33 +88,64 @@ func drainConsole() {
 	}
 }
 
-// console is a tiny line-buffered shell, demonstrating interrupt-driven I/O end
-// to end: a keystroke raises a UART IRQ, wakes the hart from wfi, is drained
-// into the ring by idle, is echoed here, and on Enter runs a command — which for
-// ls/cat reads the virtio-blk disk through archive/tar.
-func console() {
-	puts("\r\ntype 'help'.\r\nhonk> ")
-	var line []byte
+// consoleRW adapts the interrupt-fed input ring (Read) and the NS16550A UART
+// (Write) to io.ReadWriter, so the local console drives the same
+// golang.org/x/term line editor as SSH sessions (ssh.go). Read blocks
+// (sleep-poll) until bytes arrive, draining the ring that idle/drainConsole
+// fills from the UART RX interrupt.
+type consoleRW struct{}
+
+func (consoleRW) Read(p []byte) (int, error) {
 	for {
-		b, ok := input.Pop()
-		if !ok {
+		n := 0
+		for n < len(p) {
+			b, ok := input.Pop()
+			if !ok {
+				break
+			}
+			p[n] = b
+			n++
+		}
+		if n > 0 {
+			return n, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (consoleRW) Write(p []byte) (int, error) { return uart0.Write(p) }
+
+// console runs the interactive shell on the local UART. Interrupt-driven I/O
+// end to end: a keystroke raises a UART IRQ, wakes the hart from wfi, is drained
+// into the ring by idle, and x/term echoes and edits the line; on Enter runCmd
+// runs it. The line editor (echo, backspace, cursor) is x/term, shared with SSH.
+func console() {
+	t := term.NewTerminal(consoleRW{}, "honk> ")
+	io.WriteString(t, "honk: type 'help'.\r\n")
+	shellLoop(t, false)
+}
+
+// shellLoop reads commands from a terminal and runs them, shared by the UART
+// console and interactive SSH sessions. interactive controls termination:
+// exit/quit (or EOF) end an SSH session, while the local console never exits.
+func shellLoop(t *term.Terminal, interactive bool) {
+	for {
+		line, err := t.ReadLine()
+		if err != nil {
+			if interactive {
+				return // EOF: the SSH client hung up
+			}
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		switch b {
-		case '\r', '\n':
-			puts("\r\n")
-			runCmd(uart0, strings.TrimSpace(string(line)))
-			line = line[:0]
-			puts("honk> ")
-		case 0x7f, 0x08: // DEL / backspace
-			if len(line) > 0 {
-				line = line[:len(line)-1]
-				puts("\b \b")
+		switch line = strings.TrimSpace(line); line {
+		case "":
+		case "exit", "quit":
+			if interactive {
+				return
 			}
 		default:
-			line = append(line, b)
-			uart0.Tx(b) // echo
+			runCmd(t, line)
 		}
 	}
 }
