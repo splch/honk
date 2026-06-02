@@ -31,28 +31,28 @@ test("Honk OS boots and answers in the browser", async ({ page }) => {
   const consoleText = [];
   page.on("console", (m) => consoleText.push(m.text()));
 
-  await page.goto(BASE + "/?live=1", { waitUntil: "load" });
+  await page.goto(BASE + "/", { waitUntil: "load" });
 
   // Sanity: cross-origin isolation is in effect (server set the headers).
   expect(await page.evaluate(() => self.crossOriginIsolated)).toBe(true);
 
   await page.getByRole("button", { name: /launch live emulator/i }).click();
+  await expect(page.locator("#terminal")).toBeVisible();
 
-  // The xterm canvas accumulates the boot output; assert on the terminal's text.
-  const terminal = page.locator("#terminal");
-  await expect(terminal).toBeVisible();
+  // Read xterm's buffer directly (renderer-independent) via the exposed Terminal.
+  const readTerm = () =>
+    page.evaluate(() => {
+      const t = window.__honkTerm;
+      if (!t) return "";
+      const b = t.buffer.active;
+      let s = "";
+      for (let i = 0; i < b.length; i++) s += (b.getLine(i)?.translateToString(true) ?? "") + "\n";
+      return s;
+    });
 
   // Wait for the boot banner, then type a command and check the response.
-  await expect
-    .poll(() => page.evaluate(() => document.querySelector("#terminal")?.innerText || ""), {
-      timeout: 150_000,
-    })
-    .toContain("Honk OS");
+  await expect.poll(readTerm, { timeout: 150_000 }).toContain("Honk OS");
 
   await page.keyboard.type("honk\n");
-  await expect
-    .poll(() => page.evaluate(() => document.querySelector("#terminal")?.innerText || ""), {
-      timeout: 20_000,
-    })
-    .toContain("HONK!");
+  await expect.poll(readTerm, { timeout: 20_000 }).toContain("HONK!");
 });

@@ -37,12 +37,24 @@ else
   git -C "$WORKDIR/qemu-wasm" checkout FETCH_HEAD
 fi
 
+# Work around upstream URL rot in the build image's pinned tarball sources.
+# zlib.net keeps only the *current* release at the top level (and only .tar.gz in
+# fossils/), so the pinned zlib-$VER.tar.xz 404s. Pull it from the GitHub release.
+echo ">> patching Dockerfile for rotted zlib URL"
+sed -i.bak -E \
+  -e 's@https://zlib\.net/zlib-\$ZLIB_VERSION\.tar\.xz@https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/zlib-$ZLIB_VERSION.tar.gz@' \
+  -e 's@tar xJC /zlib@tar xzC /zlib@' \
+  "$WORKDIR/qemu-wasm/Dockerfile"
+grep -n 'zlib' "$WORKDIR/qemu-wasm/Dockerfile" | head -3
+
 echo ">> building emscripten build image"
 docker build -t honk-buildqemu - <"$WORKDIR/qemu-wasm/Dockerfile"
 
 echo ">> starting build container"
 docker rm -f "$BUILD_CTR" 2>/dev/null || true
-docker run --rm -d --name "$BUILD_CTR" -v "$WORKDIR/qemu-wasm":/qemu/:ro honk-buildqemu
+# Mounted writable (not :ro) so meson can materialise the dtc/* wrap subprojects
+# (libfdt is required for the riscv 'virt' machine) into subprojects/ during configure.
+docker run --rm -d --name "$BUILD_CTR" -v "$WORKDIR/qemu-wasm":/qemu/ honk-buildqemu
 
 echo ">> emconfigure + emmake qemu-system-riscv64 (this is the slow part)"
 docker exec "$BUILD_CTR" emconfigure /qemu/configure --static \

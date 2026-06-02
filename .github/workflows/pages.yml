@@ -21,8 +21,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pin to a commit SHA for reproducible emulator builds.
-  QEMU_WASM_REF: master
+  # The prebuilt QEMU-WASM bundle lives in this release (built once via
+  # `make web-qemu`, which runs web/build-qemu-wasm.sh). Bump to refresh.
+  QEMU_WASM_RELEASE: qemu-wasm-v1
 
 jobs:
   build:
@@ -46,23 +47,13 @@ jobs:
           make toolchain   # idempotent: a no-op when restored from cache
           make kernel
 
-      - name: Restore the QEMU-WASM bundle
-        id: qemucache
-        uses: actions/cache/restore@v4
-        with:
-          path: web/vendor/qemu
-          key: honk-qemuwasm-${{ runner.os }}-${{ hashFiles('web/build-qemu-wasm.sh') }}-${{ env.QEMU_WASM_REF }}
-
-      - name: Build the QEMU-WASM bundle (first run only; non-blocking)
-        if: steps.qemucache.outputs.cache-hit != 'true'
-        run: bash web/build-qemu-wasm.sh || echo "::warning::QEMU-WASM build failed; deploying the replay-only site"
-
-      - name: Save the QEMU-WASM bundle
-        if: steps.qemucache.outputs.cache-hit != 'true' && hashFiles('web/vendor/qemu/qemu-system-riscv64.wasm') != ''
-        uses: actions/cache/save@v4
-        with:
-          path: web/vendor/qemu
-          key: honk-qemuwasm-${{ runner.os }}-${{ hashFiles('web/build-qemu-wasm.sh') }}-${{ env.QEMU_WASM_REF }}
+      - name: Fetch the QEMU-WASM bundle from its release (non-blocking)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$QEMU_WASM_RELEASE" --repo "$GITHUB_REPOSITORY" \
+            --dir web/vendor/qemu --clobber \
+            || echo "::warning::QEMU-WASM release '$QEMU_WASM_RELEASE' not found; deploying the replay-only site"
 
       - name: Assemble the site
         run: make web

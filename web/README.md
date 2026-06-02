@@ -41,11 +41,14 @@ Without `make web-qemu`, `make web` still produces a working replay-only site.
 
 ## CI/CD (`.github/workflows/pages.yml`)
 
-On push to `main`: build the kernel (reusing the toolchain cache), restore-or-build
-the QEMU-WASM bundle (cached on its build-script hash + pinned ref), assemble `site/`,
+On push to `main`: build the kernel (reusing the toolchain cache), download the
+prebuilt QEMU-WASM bundle from its GitHub Release (`qemu-wasm-v1`), assemble `site/`,
 run the Playwright e2e when the bundle is present, then deploy via `actions/deploy-pages`.
-The emulator build is **non-blocking**: if it fails, the replay-only site still ships.
-First-time setup: repo **Settings → Pages → Source: GitHub Actions**.
+The download is **non-blocking**: if the release is missing, the replay-only site still
+ships. The emulator is built once (not on every push) because the WASM bundle rarely
+changes and the emscripten build is slow; refresh it with `make web-qemu` then re-upload
+the `web/vendor/qemu/*` files to the release. First-time setup: repo **Settings → Pages
+→ Source: GitHub Actions**.
 
 ## Cross-origin isolation
 
@@ -61,6 +64,7 @@ front-end deps are vendored locally so nothing is blocked under `require-corp`.
 
 Honk OS is MIT. The in-browser emulator is **QEMU (GPLv2)**; its WebAssembly build is
 produced by `web/build-qemu-wasm.sh` from
-[`ktock/qemu-wasm`](https://github.com/ktock/qemu-wasm) (pin `QEMU_WASM_REF`). The
-committed `vendor/qemu/.gitkeep` is just a placeholder; the GPL'd binaries are built in
-CI and not committed. Redistributing them obliges you to point to that QEMU source.
+[`ktock/qemu-wasm`](https://github.com/ktock/qemu-wasm). The committed
+`vendor/qemu/.gitkeep` is just a placeholder; the GPL'd binaries are published as a
+GitHub Release asset (`qemu-wasm-v1`), not committed to git. Redistributing them obliges
+you to point to that QEMU source.

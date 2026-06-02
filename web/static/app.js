@@ -53,6 +53,7 @@ async function bootHonk(mountEl, setStatus) {
   });
   term.open(mountEl);
   term.focus();
+  window.__honkTerm = term; // exposed so the e2e test can read the terminal buffer
 
   // xterm-pty bridges the terminal to Emscripten's TTY (Module.pty).
   const { master, slave } = openpty();
