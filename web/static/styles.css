@@ -2,7 +2,6 @@
   --bg: #0b0e14;
   --fg: #c7d0e0;
   --accent: #ffcf4a;
-  --accent-dim: #8a7320;
   --muted: #7a8699;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 16px;
@@ -14,11 +13,11 @@
 
 body {
   margin: 0;
+  padding: 1.5rem clamp(1rem, 4vw, 3rem) 3rem;
   background: var(--bg);
   color: var(--fg);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: ui-sans-serif, system-ui, sans-serif;
   line-height: 1.5;
-  padding: 1.5rem clamp(1rem, 4vw, 3rem) 3rem;
 }
 
 header,
@@ -28,37 +27,36 @@ footer {
   margin-inline: auto;
 }
 
+.goose,
+#replay {
+  font-family: var(--mono);
+}
+
 .goose {
   color: var(--accent);
-  font-family: var(--mono);
   font-size: clamp(0.7rem, 2.2vw, 0.95rem);
-  line-height: 1.25;
-  margin: 0 0 0.75rem;
   overflow-x: auto;
 }
 
 h1 {
-  margin: 0.25rem 0;
   font-size: 1.9rem;
 }
 
-header p {
+header p,
+.about,
+#status,
+footer {
   color: var(--muted);
-  max-width: 70ch;
 }
 
 code {
   background: #1b212c;
   padding: 0.1em 0.35em;
   border-radius: 4px;
-  font-size: 0.9em;
-}
-
-#stage {
-  margin: 1.5rem 0;
 }
 
 .terminal {
+  margin: 1.5rem 0;
   background: #000;
   border: 1px solid #1f2733;
   border-radius: 8px;
@@ -67,19 +65,11 @@ code {
   overflow: hidden;
 }
 
-/* Tier-1 replay terminal (plain text, no xterm). */
 #replay {
   white-space: pre-wrap;
   word-break: break-word;
-  color: #d7dbe0;
-  font-family: var(--mono);
   font-size: 0.82rem;
-  line-height: 1.35;
   overflow-y: auto;
-}
-
-#replay .prompt {
-  color: var(--accent);
 }
 
 #controls {
@@ -87,7 +77,6 @@ code {
   flex-wrap: wrap;
   gap: 0.75rem;
   align-items: center;
-  margin-top: 0.9rem;
 }
 
 button {
@@ -97,28 +86,12 @@ button {
   border-radius: 6px;
   padding: 0.5rem 0.9rem;
   font-weight: 600;
-  font-size: 0.95rem;
   cursor: pointer;
 }
 
-button:hover {
-  filter: brightness(1.08);
-}
-
 button:disabled {
-  background: var(--accent-dim);
-  color: #2a2300;
+  background: #8a7320;
   cursor: not-allowed;
-}
-
-#status {
-  color: var(--muted);
-  font-size: 0.9rem;
-}
-
-.about {
-  color: var(--muted);
-  max-width: 75ch;
 }
 
 .about a,
@@ -126,14 +99,9 @@ footer a {
   color: var(--accent);
 }
 
-.links {
-  font-size: 0.92rem;
-}
-
 footer {
   margin-top: 2.5rem;
   border-top: 1px solid #1c2430;
   padding-top: 1rem;
-  color: var(--muted);
   font-size: 0.82rem;
 }

@@ -4,15 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Honk OS 🪿 — RISC-V in your browser</title>
-    <meta
-      name="description"
-      content="Honk OS — a pure-Go RISC-V 64-bit operating system — booting in your browser via QEMU compiled to WebAssembly."
-    />
     <link rel="stylesheet" href="./vendor/xterm.css" />
     <link rel="stylesheet" href="./styles.css" />
-    <!-- coi-serviceworker injects the COOP/COEP headers SharedArrayBuffer (and thus
-         the threaded QEMU-WASM build) needs on GitHub Pages, which can't set headers.
-         It reloads the page once on first visit to install the service worker. -->
     <script src="./coi-serviceworker.min.js"></script>
   </head>
   <body>
@@ -23,7 +16,7 @@
   ~~~~~~</pre>
       <h1>Honk OS 🪿</h1>
       <p>
-        A small, educational operating system written in <strong>pure Go</strong> for
+        A small, educational operating system in <strong>pure Go</strong> for
         <strong>RISC-V 64-bit</strong>, booting under OpenSBI on the QEMU <code>virt</code> machine —
         here running entirely in your browser.
       </p>
@@ -31,10 +24,8 @@
 
     <main>
       <section id="stage">
-        <!-- Tier 1: dependency-free replay of a real boot. Tier 2: the live emulator. -->
         <div id="replay" class="terminal" role="img" aria-label="Recorded Honk OS boot session"></div>
         <div id="terminal" class="terminal" hidden></div>
-
         <div id="controls">
           <button id="launch" type="button">▶ Launch live emulator</button>
           <button id="replay-again" type="button">↻ Replay boot</button>
@@ -45,11 +36,9 @@
       <section class="about">
         <p>
           The <em>replay</em> above is a recording of a real boot. <strong>Launch live emulator</strong>
-          boots the actual kernel image (<code>honk.elf</code>) inside
-          <a href="https://github.com/ktock/qemu-wasm">QEMU compiled to WebAssembly</a> — the same
-          <code>qemu-system-riscv64 -machine virt -bios default -kernel honk.elf</code> you would run
-          locally, just client-side. Try <code>help</code>, <code>honk</code>, <code>uname</code>,
-          <code>devices</code>, <code>gc</code>.
+          runs the actual <code>honk.elf</code> in
+          <a href="https://github.com/ktock/qemu-wasm">QEMU compiled to WebAssembly</a>, client-side.
+          Try <code>help</code>, <code>honk</code>, <code>uname</code>, <code>devices</code>, <code>gc</code>.
         </p>
         <p class="links">
           <a href="https://github.com/splch/honk">Source &amp; build instructions</a> ·
@@ -60,9 +49,9 @@
 
     <footer>
       <p>
-        Honk OS is MIT-licensed. The in-browser emulator is QEMU (GPLv2); its WebAssembly build is
-        produced from <a href="https://github.com/ktock/qemu-wasm">ktock/qemu-wasm</a> — see
-        <a href="https://github.com/splch/honk/blob/main/web/README.md">web/README.md</a> for sources.
+        Honk OS is MIT-licensed. The in-browser emulator is QEMU (GPLv2), built from
+        <a href="https://github.com/ktock/qemu-wasm">ktock/qemu-wasm</a> — see
+        <a href="https://github.com/splch/honk/blob/main/web/README.md">web/README.md</a>.
       </p>
     </footer>
 
