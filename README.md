@@ -46,15 +46,21 @@ main.go              # honk entry (//go:build tamago): banner + tasks + heartbea
 board_virt.go        # //go:build virt     — selects the virt board (default)
 board_sifive_u.go    # //go:build sifive_u — selects the Phase 0 board
 internal/banner/     # hardware-independent, host-testable pure logic
-internal/board/virt/ # S-mode-under-OpenSBI board: the runtime seam (DESIGN.md §6)
+internal/fdt/        # device-tree parser (host-tested)
+internal/ring/       # lock-free SPSC byte queue (host-tested, -race)
+internal/sbi/        # SBI firmware ecall wrappers
+internal/mmio/       # volatile MMIO accessors (asm)
+internal/uart/       # NS16550A driver
+internal/plic/       # PLIC interrupt-controller driver
+internal/board/virt/ # S-mode-under-OpenSBI board: runtime seam, trap, vm, console
 boot/virt/           # 20-byte load-base trampoline (trampoline.s)
 boot/sifive_u/       # Phase 0 trampoline BIOS (bios.s + bios.ld)
 Makefile             # toolchain + build + qemu + smoke + test (TARGET=virt|sifive_u)
 GO.md RV64.md DESIGN.md
 ```
 
-Planned next (DESIGN.md §11): drivers under `internal/{fdt,trap,plic,clint,vm,uart,virtio}`
-and an `internal/sbi` ecall package, in RV64.md's bringup order.
+Planned next (DESIGN.md §11): virtio-blk + a filesystem, and virtio-net + a
+userspace TCP/IP stack behind `net.SocketFunc`, in RV64.md's bringup order.
 
 ## Status
 
@@ -66,7 +72,10 @@ discovery (`internal/fdt`, host-unit-tested) — e.g. it reports `riscv-virtio,q
 handler that reports faults (`scause`/`sepc`/`stval`) and halts, idles the hart
 in `wfi` between timer deadlines (no busy-poll), and runs under an
 **identity-mapped Sv39 page table enforcing W^X** (kernel text `R|X`, all else
-`R|W`-no-exec, A/D preset). Next: a PLIC driver → interrupt-driven NS16550A UART
+`R|W`-no-exec, A/D preset). It owns the **NS16550A UART** for interrupt-driven
+input: a keystroke raises a PLIC interrupt that wakes the hart from `wfi`, `idle`
+drains it into a lock-free ring, and a console goroutine echoes it (type at the
+`honk>` prompt). Next: virtio-blk + a filesystem, virtio-net + `net/http`
 (DESIGN.md §11, RV64.md bringup order).
 
 **Phase 0** — runs on QEMU `sifive_u` (M-mode trampoline; the existing TamaGo

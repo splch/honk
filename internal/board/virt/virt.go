@@ -69,6 +69,7 @@ func hwinit1() {
 	goos.Idle = idle
 	probe()
 	enablePaging() // Sv39 identity map with W^X (RV64.md Part 5, DESIGN.md §9)
+	initConsole()  // take over the NS16550A UART (RV64.md Part 7.3)
 }
 
 const maxInt64 = 1<<63 - 1
@@ -77,21 +78,21 @@ const maxInt64 = 1<<63 - 1
 func exit(int32) { sbi.Shutdown() }
 
 // idle is the runtime's CPU idle governor (called with the absolute nanotime
-// deadline of the next pending timer, or math.MaxInt64 if none). It arms the
-// S-timer at the deadline and waits in low-power wfi until it fires; the
-// free-running `time` counter (see nanotime) then resolves the sleep when the
-// scheduler re-polls. A deadline of math.MaxInt64 means no goroutine will ever
-// run again, so power off cleanly via SBI.
+// deadline of the next pending timer, or math.MaxInt64 if none). It first
+// drains any pending console input (clearing the external interrupt), then arms
+// the S-timer at the deadline and waits in low-power wfi. The hart is also woken
+// early by UART input (sie.SEIE), so honk sleeps until either a timer fires or a
+// key is pressed — it no longer needs to busy-poll, and it stays alive for
+// interactive input rather than powering off when no goroutine is runnable.
 func idle(until int64) {
-	switch {
-	case until == maxInt64:
-		sbi.Shutdown()
-	case until > nanotime():
-		sbi.SetTimer(uint64(until) / nsPerTick) // arm S-timer at the deadline
-		wfi()                                   // sleep until the timer is pending
+	drainConsole()
+	if until != 0 && until != maxInt64 {
+		if until <= nanotime() {
+			return // the deadline has passed; a goroutine is ready to run
+		}
+		sbi.SetTimer(uint64(until) / nsPerTick) // wake at the deadline
 	}
-	// Otherwise the deadline has passed (or there is none): return and let the
-	// scheduler re-poll the `time` clock.
+	wfi() // woken by the timer (if armed) or by UART input
 }
 
 // probe parses the firmware device tree and records the discovered hardware,

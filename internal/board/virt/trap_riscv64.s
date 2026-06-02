@@ -16,6 +16,14 @@ TEXT ·enableTimerIRQ(SB),NOSPLIT,$0
 	CSRRS	T0, SIE, ZERO
 	RET
 
+// enableExtIRQ sets sie.SEIE so a pending S-external (PLIC) interrupt can wake
+// `wfi`, exactly as enableTimerIRQ does for the timer (sstatus.SIE stays 0, so
+// the interrupt never traps — idle drains it).
+TEXT ·enableExtIRQ(SB),NOSPLIT,$0
+	MOV	$(1<<9), T0
+	CSRRS	T0, SIE, ZERO
+	RET
+
 // wfi waits for an interrupt (low-power idle). WFI has no Go asm mnemonic.
 TEXT ·wfi(SB),NOSPLIT,$0
 	WORD	$0x10500073 // wfi

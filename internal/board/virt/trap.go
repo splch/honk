@@ -7,6 +7,7 @@ import "github.com/splch/honk/internal/sbi"
 // implemented in trap_riscv64.s
 func setTrapVector()
 func enableTimerIRQ()
+func enableExtIRQ()
 func wfi()
 func readSCause() uint64
 func readSEPC() uint64
@@ -38,19 +39,20 @@ func trapVector() {
 	sbi.Shutdown()
 }
 
-// puts and printHex write directly to the SBI console without allocating, so
-// they are safe to use from the trap handler.
+// puts and printHex write to the console one byte at a time without allocating,
+// so they are safe from the trap handler. They go through printk, which targets
+// the SBI console early and the UART once it is up.
 func puts(s string) {
 	for i := 0; i < len(s); i++ {
-		sbi.ConsolePutchar(s[i])
+		printk(s[i])
 	}
 }
 
 func printHex(v uint64) {
 	const digits = "0123456789abcdef"
-	sbi.ConsolePutchar('0')
-	sbi.ConsolePutchar('x')
+	printk('0')
+	printk('x')
 	for shift := 60; shift >= 0; shift -= 4 {
-		sbi.ConsolePutchar(digits[(v>>uint(shift))&0xf])
+		printk(digits[(v>>uint(shift))&0xf])
 	}
 }

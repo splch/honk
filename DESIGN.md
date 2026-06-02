@@ -390,6 +390,21 @@ mechanism and treats fancier ISR ergonomics as out of scope. The wake path
 exists precisely because an IRQ can land mid-GC at an unsafe point; inherit that
 solution, don't casually "improve" it.
 
+> **Realized (see §14), simpler than the above.** honk avoids a resumable ISR
+> entirely. It keeps `sstatus.SIE = 0` so **no interrupt ever traps**, and relies
+> on the RISC-V rule that `wfi` completes on any `sie`-enabled pending interrupt
+> regardless of the global enable. Both the timer (`sie.STIE`) and the UART
+> (`sie.SEIE`, via the PLIC) therefore just *wake the hart from `wfi`*. The
+> `idle` hook then drains the PLIC/UART into a lock-free SPSC ring
+> (`internal/ring`) — claiming and completing the source so `wfi` sleeps again —
+> and a console goroutine consumes the ring. No registers are saved, no code runs
+> in interrupt context, and the GC is never interrupted at an unsafe point, so
+> the whole class of "IRQ mid-GC" hazards disappears. The trap vector
+> (`internal/board/virt/trap.go`) is reached only for synchronous **exceptions**,
+> which it reports and halts. The trade-off is up to one poll interval (~10 ms)
+> of latency between drain and echo; a future `WakeG`/`os/signal` path would make
+> the wake immediate, but is not needed for a console.
+
 ---
 
 ## 9. Memory, paging, and W^X
