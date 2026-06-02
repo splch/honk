@@ -1,90 +1,68 @@
-# Honk OS 🪿
+# honk
 
-[![CI](https://github.com/splch/honk/actions/workflows/ci.yml/badge.svg)](https://github.com/splch/honk/actions/workflows/ci.yml)
+A small **RISC-V 64-bit operating system written in pure Go** — a
+[TamaGo](https://github.com/usbarmory/tamago) unikernel in which the Go runtime
+*is* the kernel, goroutines are the tasks, and channels are the IPC. No
+user/kernel split, no process model; just drivers plus the full Go runtime and
+standard library.
 
-A small, educational operating system written in **pure Go** for **RISC-V 64-bit**.
+- **Why it's built this way** → [DESIGN.md](./DESIGN.md)
+- **The hardware model** → [RV64.md](./RV64.md)
+- **The Go we write** → [GO.md](./GO.md)
 
-Honk OS boots under [OpenSBI](https://github.com/riscv-software-src/opensbi) on
-the QEMU `virt` machine and runs the **standard Go runtime — goroutines,
-channels, and the garbage collector — directly in supervisor mode as the kernel
-itself.** There is no C in the kernel: shell, drivers, and boot logic
-are all Go.
+## Quickstart
 
-A session looks like this — the goroutine count, memory, and version figures are
-illustrative; they shift as the GC runs and track the toolchain:
-
-```
-      __      Honk OS
- \ __( o)<    pure Go on RISC-V, supervisor mode under OpenSBI
-  (  > )      goroutines and a garbage collector are the kernel
-  ~~~~~~      type 'help' for commands
-
-honk> uname
-Honk OS (pure Go) riscv64 S-mode/OpenSBI
-honk> stats
-goroutines 1, noos/riscv64, go1.24.5-embedded
-honk> mem
-heap 20272B, total 20568B, numGC 1
-honk> gc
-gc done
-honk> mem
-heap 20048B, total 20696B, numGC 2          # the GC is live and observable
-honk> halt
-honk... powering off.
-```
-
-## Quick start
-
-Requirements: an existing Go (≥1.22) as a bootstrap compiler, `git`, and
-`qemu-system-riscv64`.
+Needs a host Go (for bootstrap + host tests), QEMU, and a RISC-V ELF toolchain
+for the boot trampolines (`dtc` is only needed for the sifive_u board):
 
 ```sh
-make toolchain   # one-time: clone + patch + build the Embedded Go toolchain (~5 min)
-make run         # build the kernel and boot it in QEMU  (quit with Ctrl-A then x)
-make test        # non-interactive smoke test: pipes a command session, expects poweroff
+brew install qemu dtc riscv64-elf-gcc      # macOS
+
+make toolchain     # build the tamago-go compiler into ~/.cache/tamago-go (~40s, once)
+make qemu          # boot honk in QEMU virt, S-mode under OpenSBI (quit: Ctrl-A x)
+make qemu TARGET=sifive_u   # the Phase 0 board (machine-mode, via a BIOS)
 ```
 
-## How it works
-
-Plain Go can't target bare metal — it always assumes an OS underneath. Honk OS
-builds on [**Embedded Go**](https://embeddedgo.github.io/) (`GOOS=noos`), which
-runs the *real* Go runtime freestanding, plus a small vendored patch
-([`toolchain/`](toolchain/)) that ports its RISC-V scheduler and trap handler from
-**machine mode** to **supervisor mode** so the kernel runs cleanly under OpenSBI.
-
-The boot path:
+Expected boot output:
 
 ```
-QEMU  ->  OpenSBI (M-mode firmware)  ->  Honk kernel (S-mode) @ 0x80200000
-                                            |
-                          runtime entry sets up a stack, BSS, g
-                                            |
-                          rt0_go: heap init, scheduler init
-                                            |
-                     SRET to U-mode  ->  main goroutine  ->  shell
+honk: go1.26.3 riscv64 (qemu/virt)
+  honk: task 1 reporting in
+  ...
+honk #1 — up 3s, N goroutines
 ```
 
-**The key idea** (the same split [xv6](https://pdos.csail.mit.edu/6.1810/) uses):
-the kernel, scheduler, and trap handlers run in **supervisor mode (S)**, while
-goroutines run in **user mode (U)**. Embedded Go's runtime implements its
-goroutine→kernel syscalls with the `ecall` instruction — and an `ecall` from
-U-mode traps *down* into our S-mode handler (whereas an `ecall` from S-mode would
-trap *up* to OpenSBI). Running goroutines in U-mode is what makes the whole
-runtime work in supervisor mode. With no paging yet, OpenSBI's PMP already grants
-U/S full access to RAM and the device MMIO pages, so user-mode goroutines can
-touch the UART directly.
+Other targets: `make smoke` (non-interactive boot + banner check, for CI),
+`make test` (host-side unit tests with the race detector), `make qemu-gdb`,
+`make vet`, `make fmt`, `make clean`, `make help`.
+
+> Already have a `tamago-go` build elsewhere? Skip `make toolchain` and pass
+> `TAMAGO=/path/to/tamago-go/bin/go` to any target.
+
+## Layout
+
+```
+main.go              # honk entry (//go:build tamago): banner + tasks + heartbeat
+board_virt.go        # //go:build virt     — selects the virt board (default)
+board_sifive_u.go    # //go:build sifive_u — selects the Phase 0 board
+internal/banner/     # hardware-independent, host-testable pure logic
+internal/board/virt/ # S-mode-under-OpenSBI board: the runtime seam (DESIGN.md §6)
+boot/virt/           # 20-byte load-base trampoline (trampoline.s)
+boot/sifive_u/       # Phase 0 trampoline BIOS (bios.s + bios.ld)
+Makefile             # toolchain + build + qemu + smoke + test (TARGET=virt|sifive_u)
+GO.md RV64.md DESIGN.md
+```
+
+Planned next (DESIGN.md §11): drivers under `internal/{fdt,trap,plic,clint,vm,uart,virtio}`
+and an `internal/sbi` ecall package, in RV64.md's bringup order.
 
 ## Status
 
-Working today: boot → full Go runtime (goroutines, channels, GC, maps) in S-mode
-→ interactive shell over a UART → clean poweroff.
+**Phase 1 (current)** — boots to full Go in **supervisor mode under OpenSBI** on
+QEMU `virt` (honk's own `internal/board/virt`): S-mode `cpuinit`, SBI console,
+`time`-CSR clock, goroutines + timer. Next: DTB parsing, a trap handler, and the
+virtio/UART drivers (DESIGN.md §11).
 
-**The vision** — Honk as a minimal, readable, modern successor to xv6 — and the full
-curriculum and roadmap live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
-
-## Credits & references
-
-- [Embedded Go](https://github.com/embeddedgo/go) — the freestanding Go runtime this builds on
-- [TamaGo](https://github.com/usbarmory/tamago) and Go proposal [#73608](https://github.com/golang/go/issues/73608) — bare-metal Go
-- [xv6-riscv](https://github.com/mit-pdos/xv6-riscv) — the S/U-mode kernel reference
-- [OpenSBI](https://github.com/riscv-software-src/opensbi) and the [RISC-V SBI](https://github.com/riscv-non-isa/riscv-sbi-doc) / privileged specs
+**Phase 0** — runs on QEMU `sifive_u` (M-mode trampoline; the existing TamaGo
+RISC-V port). **Phase 1** (next) — a `virt` board package booting under OpenSBI,
+then drivers in RV64.md's bringup order. See DESIGN.md §4 and §14.
