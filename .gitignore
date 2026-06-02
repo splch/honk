@@ -5,5 +5,16 @@
 *.dtb
 /out.txt
 
+# Web / GitHub Pages
+/site/
+/node_modules/
+/package.json
+/package-lock.json
+/test-results/
+/playwright-report/
+# Built QEMU-WASM bundle (produced by web/build-qemu-wasm.sh / CI; keep the dir)
+/web/vendor/qemu/*
+!/web/vendor/qemu/.gitkeep
+
 # Local Claude Code config
 .claude/settings.local.json

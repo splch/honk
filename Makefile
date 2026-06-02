@@ -23,7 +23,9 @@ BUILD := $(GOENV) $(GO) build -tags noostest -ldflags '-M $(LOAD_ADDR):$(RAM_SIZ
 QEMU_MEM ?= 32
 QEMU = qemu-system-riscv64 -machine virt -m $(QEMU_MEM) -smp 1 -bios default
 
-.PHONY: all kernel run test test-discover debug toolchain clean distclean
+WEB_OUT := site
+
+.PHONY: all kernel run test test-discover debug toolchain clean distclean web web-qemu web-serve
 
 all: kernel
 
@@ -54,8 +56,37 @@ debug: kernel
 toolchain $(GO):
 	./toolchain/build-toolchain.sh
 
+# Assemble the static site for GitHub Pages into ./site. Bundles the recorded boot
+# (always works) plus, if present, the QEMU-WASM live emulator. Run 'make kernel'
+# (or 'make web-qemu' for the emulator) first; CI does both.
+web:
+	@test -f $(KERNEL) || { echo "$(KERNEL) missing - run 'make kernel' first"; exit 1; }
+	rm -rf $(WEB_OUT)
+	mkdir -p $(WEB_OUT)/cast $(WEB_OUT)/vendor
+	cp web/static/index.html web/static/styles.css web/static/replay.js web/static/app.js $(WEB_OUT)/
+	cp web/vendor/coi-serviceworker.min.js $(WEB_OUT)/
+	cp web/vendor/xterm.js web/vendor/xterm.css web/vendor/xterm-pty.js $(WEB_OUT)/vendor/
+	@if ls web/vendor/qemu/* >/dev/null 2>&1 && [ -f web/vendor/qemu/qemu-system-riscv64.wasm ]; then \
+		mkdir -p $(WEB_OUT)/vendor/qemu; \
+		find web/vendor/qemu -type f ! -name .gitkeep -exec cp {} $(WEB_OUT)/vendor/qemu/ \; ; fi
+	cp web/cast/honk-boot.log $(WEB_OUT)/cast/
+	cp $(KERNEL) $(WEB_OUT)/honk.elf
+	touch $(WEB_OUT)/.nojekyll
+	@if [ -f $(WEB_OUT)/vendor/qemu/qemu-system-riscv64.wasm ]; then \
+		echo "assembled $(WEB_OUT)/ (live emulator: present)"; \
+	else echo "assembled $(WEB_OUT)/ (live emulator: replay-only - run 'make web-qemu')"; fi
+
+# Build the QEMU-WASM bundle (Docker + emscripten; slow, infrequent).
+web-qemu:
+	bash web/build-qemu-wasm.sh
+
+# Preview locally with the COOP/COEP headers the live emulator needs.
+web-serve: web
+	node web/test/serve.mjs $(WEB_OUT) 8088
+
 clean:
 	rm -f $(KERNEL)
+	rm -rf $(WEB_OUT)
 
 distclean: clean
 	rm -rf .toolchain
