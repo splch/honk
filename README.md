@@ -59,9 +59,11 @@ and an `internal/sbi` ecall package, in RV64.md's bringup order.
 ## Status
 
 **Phase 1 (current)** — boots to full Go in **supervisor mode under OpenSBI** on
-QEMU `virt` (honk's own `internal/board/virt`): S-mode `cpuinit`, SBI console,
-`time`-CSR clock, goroutines + timer. Next: DTB parsing, a trap handler, and the
-virtio/UART drivers (DESIGN.md §11).
+QEMU `virt` (honk's own `internal/board/virt`): S-mode `cpuinit`, SBI console
+(`internal/sbi`), `time`-CSR clock, goroutines + timer, and device-tree hardware
+discovery (`internal/fdt`, host-unit-tested) — e.g. it reports `riscv-virtio,qemu,
+1 hart(s), RAM 512 MiB, timebase 10 MHz` at boot. Next: a trap handler → PLIC →
+interrupt-driven UART, then Sv39 W^X (DESIGN.md §11, RV64.md bringup order).
 
 **Phase 0** — runs on QEMU `sifive_u` (M-mode trampoline; the existing TamaGo
 RISC-V port). **Phase 1** (next) — a `virt` board package booting under OpenSBI,

@@ -18,4 +18,4 @@ const nsPerTick = 100
 //go:linkname nanotime runtime/goos.Nanotime
 func nanotime() int64 { return int64(readTime() * nsPerTick) }
 
-func readTime() uint64 // sbi_riscv64.s
+func readTime() uint64 // time_riscv64.s

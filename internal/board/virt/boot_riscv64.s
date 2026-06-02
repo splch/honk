@@ -6,6 +6,11 @@
 // tamago riscv64.Init but touches only S-level CSRs (OpenSBI owns M-mode), then
 // transfers to the privilege-agnostic Go runtime entry _rt0_tamago_start.
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
+	// stash the firmware boot args before anything can clobber them:
+	// a0 = hartid, a1 = DTB physical address (consumed in hwinit1).
+	MOV	A0, ·hartID(SB)
+	MOV	A1, ·dtbPtr(SB)
+
 	// mask supervisor interrupts (OpenSBI leaves SIE clear; be explicit)
 	MOV	$0, T0
 	CSRRW	T0, SIE, ZERO
