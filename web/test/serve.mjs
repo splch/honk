@@ -1,7 +1,6 @@
-// Minimal static server that sets the cross-origin-isolation headers QEMU-WASM needs
-// (SharedArrayBuffer). Used by the e2e test and for local preview. On GitHub Pages
-// these headers come from coi-serviceworker instead; here we set them directly so a
-// headless browser gets `crossOriginIsolated === true` without a service worker.
+// Minimal static server that sets the COOP/COEP headers QEMU-WASM needs
+// (SharedArrayBuffer), so a headless browser is crossOriginIsolated without the
+// service worker GitHub Pages relies on. Used by the e2e test and local preview.
 //
 //   node web/test/serve.mjs [dir=site] [port=8088]
 

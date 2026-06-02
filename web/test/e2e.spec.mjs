@@ -1,12 +1,8 @@
-// End-to-end test of the live emulator: serve site/ with COOP/COEP, open it in a
-// headless browser, launch QEMU-WASM, drive the shell, and assert Honk OS responds.
-//
-// Run (after `make web` and a built web/vendor/qemu bundle):
+// End-to-end test of the live emulator: serve site/ with COOP/COEP, launch QEMU-WASM
+// in a headless browser, drive the shell, and assert Honk OS responds. Run after
+// `make web` with a built web/vendor/qemu bundle:
 //   npm i -D @playwright/test && npx playwright install --with-deps chromium
 //   npx playwright test web/test/e2e.spec.mjs
-//
-// This is the authoritative end-to-end check for the browser path; CI runs it after
-// building the QEMU-WASM bundle.
 
 import { test, expect } from "@playwright/test";
 import { spawn } from "node:child_process";

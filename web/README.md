@@ -17,7 +17,7 @@ visitor's browser. Nothing executes on a server.
 
 ```
 web/
-  static/      index.html, styles.css, replay.js (tier 1), app.js (tier 2 glue)
+  static/      index.html, styles.css, app.js (replay + live-emulator glue)
   vendor/      xterm.js, xterm.css, xterm-pty.js, coi-serviceworker.min.js (committed)
   vendor/qemu/ qemu-system-riscv64.{js,wasm,worker.js} + opensbi…fw_dynamic.bin (built, gitignored)
   cast/        honk-boot.log (recorded boot)

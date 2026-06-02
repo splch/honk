@@ -63,7 +63,7 @@ web:
 	@test -f $(KERNEL) || { echo "$(KERNEL) missing - run 'make kernel' first"; exit 1; }
 	rm -rf $(WEB_OUT)
 	mkdir -p $(WEB_OUT)/cast $(WEB_OUT)/vendor
-	cp web/static/index.html web/static/styles.css web/static/replay.js web/static/app.js $(WEB_OUT)/
+	cp web/static/index.html web/static/styles.css web/static/app.js $(WEB_OUT)/
 	cp web/vendor/coi-serviceworker.min.js $(WEB_OUT)/
 	cp web/vendor/xterm.js web/vendor/xterm.css web/vendor/xterm-pty.js $(WEB_OUT)/vendor/
 	@if ls web/vendor/qemu/* >/dev/null 2>&1 && [ -f web/vendor/qemu/qemu-system-riscv64.wasm ]; then \

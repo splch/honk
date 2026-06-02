@@ -10,12 +10,9 @@
     />
     <link rel="stylesheet" href="./vendor/xterm.css" />
     <link rel="stylesheet" href="./styles.css" />
-    <!--
-      coi-serviceworker injects COOP/COEP headers so SharedArrayBuffer (needed by
-      the threaded QEMU-WASM build) works on GitHub Pages, which cannot set headers.
-      It reloads the page once on first visit to install the service worker. Casual
-      visitors only ever see the replay below; the live emulator is opt-in.
-    -->
+    <!-- coi-serviceworker injects the COOP/COEP headers SharedArrayBuffer (and thus
+         the threaded QEMU-WASM build) needs on GitHub Pages, which can't set headers.
+         It reloads the page once on first visit to install the service worker. -->
     <script src="./coi-serviceworker.min.js"></script>
   </head>
   <body>
@@ -34,10 +31,8 @@
 
     <main>
       <section id="stage">
-        <!-- Tier 1: instant, dependency-free replay of a real boot (always works). -->
+        <!-- Tier 1: dependency-free replay of a real boot. Tier 2: the live emulator. -->
         <div id="replay" class="terminal" role="img" aria-label="Recorded Honk OS boot session"></div>
-
-        <!-- Tier 2: the live, interactive emulator mounts here on demand. -->
         <div id="terminal" class="terminal" hidden></div>
 
         <div id="controls">
@@ -71,6 +66,6 @@
       </p>
     </footer>
 
-    <script type="module" src="./replay.js"></script>
+    <script type="module" src="./app.js"></script>
   </body>
 </html>

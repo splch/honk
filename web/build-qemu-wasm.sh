@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
 # Build qemu-system-riscv64 as WebAssembly and stage it under web/vendor/qemu/.
 #
-# This is the one heavy, infrequently-changing step. It needs Docker + several GB and
-# tens of minutes, so it runs on CI runners (cached) rather than every push — the
-# kernel image (honk.elf) is loaded into the emulator at runtime, so rebuilding the
-# kernel never requires rerunning this.
+# Heavy and infrequent (Docker, several GB, tens of minutes), so it runs on CI rather
+# than every push — honk.elf is loaded into the emulator at runtime, so rebuilding the
+# kernel never requires rerunning this. Pin QEMU_WASM_REF to a commit for reproducible
+# builds; until qemu-wasm lands upstream we build from ktock/qemu-wasm.
 #
 # Output (consumed by web/static/app.js):
-#   web/vendor/qemu/qemu-system-riscv64.js          (ES6 module; default export = init)
-#   web/vendor/qemu/qemu-system-riscv64.wasm
-#   web/vendor/qemu/qemu-system-riscv64.worker.js   (if emitted by this emscripten)
-#   web/vendor/qemu/opensbi-riscv64-generic-fw_dynamic.bin
-#
-# Pin QEMU_WASM_REF to a commit for reproducible builds. Upstreaming into QEMU proper
-# is in progress (TCI landed in QEMU 10.1); until then we build from ktock/qemu-wasm.
+#   qemu-system-riscv64.js          (ES6 module; default export = init)
+#   qemu-system-riscv64.wasm
+#   qemu-system-riscv64.worker.js   (if emitted by this emscripten)
+#   opensbi-riscv64-generic-fw_dynamic.bin
 set -euo pipefail
 
 QEMU_WASM_REPO="${QEMU_WASM_REPO:-https://github.com/ktock/qemu-wasm.git}"
