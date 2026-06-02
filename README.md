@@ -52,7 +52,9 @@ internal/sbi/        # SBI firmware ecall wrappers
 internal/mmio/       # volatile MMIO accessors (asm)
 internal/uart/       # NS16550A driver
 internal/plic/       # PLIC interrupt-controller driver
-internal/board/virt/ # S-mode-under-OpenSBI board: runtime seam, trap, vm, console
+internal/virtio/     # virtio-mmio v2 block driver (io.ReaderAt)
+internal/board/virt/ # S-mode-under-OpenSBI board: runtime seam, trap, vm, console, disk
+disk/                # demo files tarred into the virtio-blk image
 boot/virt/           # 20-byte load-base trampoline (trampoline.s)
 boot/sifive_u/       # Phase 0 trampoline BIOS (bios.s + bios.ld)
 Makefile             # toolchain + build + qemu + smoke + test (TARGET=virt|sifive_u)
@@ -73,10 +75,12 @@ handler that reports faults (`scause`/`sepc`/`stval`) and halts, idles the hart
 in `wfi` between timer deadlines (no busy-poll), and runs under an
 **identity-mapped Sv39 page table enforcing W^X** (kernel text `R|X`, all else
 `R|W`-no-exec, A/D preset). It owns the **NS16550A UART** for interrupt-driven
-input: a keystroke raises a PLIC interrupt that wakes the hart from `wfi`, `idle`
-drains it into a lock-free ring, and a console goroutine echoes it (type at the
-`honk>` prompt). Next: virtio-blk + a filesystem, virtio-net + `net/http`
-(DESIGN.md §11, RV64.md bringup order).
+input driving a tiny **shell** (`help`, `ls`, `cat <file>`) at the `honk>`
+prompt: a keystroke raises a PLIC interrupt that wakes the hart from `wfi`,
+`idle` drains it into a lock-free ring, and a console goroutine runs commands.
+`ls`/`cat` read a **virtio-blk** disk (`internal/virtio`) parsed as a read-only
+filesystem with the Go stdlib `archive/tar`. Next: virtio-net + a userspace
+TCP/IP stack behind `net.SocketFunc` for `net/http` (DESIGN.md §11).
 
 **Phase 0** — runs on QEMU `sifive_u` (M-mode trampoline; the existing TamaGo
 RISC-V port). **Phase 1** (next) — a `virt` board package booting under OpenSBI,

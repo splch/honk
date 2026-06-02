@@ -36,11 +36,14 @@ ifeq ($(TARGET),virt)
   TEXT_START  := 0x80210000        # RamStart (0x80200000) + 0x10000, above OpenSBI
   LOADBASE    := 0x8020f000        # TEXT_START - 0x1000: ELF-header page OpenSBI enters
   TAGS        := virt
-  KERNEL_DEPS := $(BUILD)/$(APP) $(BUILD)/trampoline.bin
+  KERNEL_DEPS := $(BUILD)/$(APP) $(BUILD)/trampoline.bin $(BUILD)/disk.img
   QEMU := qemu-system-riscv64 -machine virt -m 512M -smp 1 -bios default \
-          -nographic -monitor none -serial stdio -no-reboot
+          -nographic -monitor none -serial stdio -no-reboot \
+          -global virtio-mmio.force-legacy=false
   # loaded AFTER -kernel (see recipes) so the trampoline wins the load-base address
-  QEMU_EXTRA := -device loader,file=$(BUILD)/trampoline.bin,addr=$(LOADBASE)
+  QEMU_EXTRA := -device loader,file=$(BUILD)/trampoline.bin,addr=$(LOADBASE) \
+                -drive file=$(BUILD)/disk.img,format=raw,if=none,id=hd0 \
+                -device virtio-blk-device,drive=hd0
 else ifeq ($(TARGET),sifive_u)
   TEXT_START  := 0x80010000        # fu540 ramStart (0x80000000) + 0x10000
   TAGS        := sifive_u,semihosting
@@ -112,6 +115,10 @@ $(BUILD)/trampoline.bin: $(BUILD)/$(APP) boot/virt/trampoline.s | $(BUILD)
 	$(RISCV_GCC) -I$(BUILD) -march=rv64g -mabi=lp64 -nostdlib -nostartfiles \
 	  -Ttext=$(LOADBASE) boot/virt/trampoline.s -o $(BUILD)/trampoline.elf
 	$(RISCV_OBJCOPY) -O binary $(BUILD)/trampoline.elf $@
+
+# virt-only: a read-only tar image used as the virtio-blk disk.
+$(BUILD)/disk.img: $(wildcard disk/*) | $(BUILD)
+	cd disk && COPYFILE_DISABLE=1 tar -cf ../$@ *
 
 qemu: $(KERNEL_DEPS)
 	$(QEMU) -kernel $(BUILD)/$(APP) $(QEMU_EXTRA)

@@ -3,6 +3,7 @@
 package virt
 
 import (
+	"strings"
 	"time"
 	_ "unsafe"
 
@@ -83,11 +84,13 @@ func drainConsole() {
 	}
 }
 
-// console echoes received input with minimal line editing, demonstrating
-// interrupt-driven asynchronous I/O end to end: a keystroke raises a UART IRQ,
-// wakes the hart from wfi, is drained into the ring by idle, and is echoed here.
+// console is a tiny line-buffered shell, demonstrating interrupt-driven I/O end
+// to end: a keystroke raises a UART IRQ, wakes the hart from wfi, is drained
+// into the ring by idle, is echoed here, and on Enter runs a command — which for
+// ls/cat reads the virtio-blk disk through archive/tar.
 func console() {
-	puts("\r\nhonk> ")
+	puts("\r\ntype 'help'.\r\nhonk> ")
+	var line []byte
 	for {
 		b, ok := input.Pop()
 		if !ok {
@@ -96,11 +99,53 @@ func console() {
 		}
 		switch b {
 		case '\r', '\n':
-			puts("\r\nhonk> ")
+			puts("\r\n")
+			run(strings.TrimSpace(string(line)))
+			line = line[:0]
+			puts("honk> ")
 		case 0x7f, 0x08: // DEL / backspace
-			puts("\b \b")
+			if len(line) > 0 {
+				line = line[:len(line)-1]
+				puts("\b \b")
+			}
 		default:
-			uart0.Tx(b)
+			line = append(line, b)
+			uart0.Tx(b) // echo
 		}
+	}
+}
+
+// run executes one shell command line.
+func run(cmd string) {
+	switch {
+	case cmd == "":
+	case cmd == "help":
+		puts("commands: help, ls, cat <file>\r\n")
+	case cmd == "ls":
+		if Disk == nil {
+			puts("no disk\r\n")
+			return
+		}
+		listDisk()
+	case strings.HasPrefix(cmd, "cat "):
+		if Disk == nil {
+			puts("no disk\r\n")
+			return
+		}
+		data, err := ReadFile(strings.TrimSpace(cmd[len("cat "):]))
+		if err != nil {
+			puts("no such file\r\n")
+			return
+		}
+		for _, c := range data {
+			if c == '\n' {
+				uart0.Tx('\r')
+			}
+			uart0.Tx(c)
+		}
+	default:
+		puts("unknown command: ")
+		puts(cmd)
+		puts("\r\n")
 	}
 }

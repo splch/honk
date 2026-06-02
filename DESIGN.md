@@ -494,13 +494,19 @@ through device bringup, then **diverges deliberately** at the process layer (the
 | 5. Physical page allocator | **the Go runtime already has one** — skip | runtime |
 | 6. Sv39 paging | `vm`: kernel table, W^X, A/D preset, `sfence`-bracketed `satp` | vm |
 | 7. Timer | Sstc `stimecmp` or SBI `set_timer`; drives `Nanotime`/`Idle` | clint/sbi |
-| 8. PLIC + interrupt-driven UART | `plic` + `uart` ISR goroutine via `os/signal` | plic, uart |
+| 8. PLIC + interrupt-driven UART | `plic`+`uart`+`ring`: RX IRQ wakes wfi, `idle` drains, a console shell goroutine consumes | plic, uart, ring |
 | **9. Processes (U-mode)** | **replaced**: "tasks" = goroutines; isolation (if needed) via GoTEE | application |
-| 10. virtio-blk + FS, then fork/exec | virtio-blk + Go `io/fs`; virtio-net + `net.SocketFunc` → `net/http`; **no** fork/exec | virtio, net |
+| 10. virtio-blk + FS, then fork/exec | virtio-mmio v2 block driver + read-only tar via stdlib `archive/tar`; **no** fork/exec | virtio |
 
 Net effect: steps 5 and 9–10's process machinery evaporate; the rest is RV64.md
 transcribed into idiomatic Go. The "OS" UX is a small shell goroutine (à la
 `kotama`) that spawns work as goroutines.
+
+> **Status (§14).** Steps 1–8 and 10 are implemented and validated in QEMU
+> (`make smoke TARGET=virt`); step 9 is goroutines by design. Implementation
+> note: step 8's interrupt model is the `wfi`-masked-wake + `idle`-drain of §8,
+> not a resumable `os/signal` ISR. The remaining item is **virtio-net** + a
+> userspace TCP/IP stack behind `net.SocketFunc` for `net/http`.
 
 ---
 

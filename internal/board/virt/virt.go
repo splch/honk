@@ -70,6 +70,7 @@ func hwinit1() {
 	probe()
 	enablePaging() // Sv39 identity map with W^X (RV64.md Part 5, DESIGN.md §9)
 	initConsole()  // take over the NS16550A UART (RV64.md Part 7.3)
+	initDisk()     // mount a virtio-blk disk if attached (RV64.md Part 7.4)
 }
 
 const maxInt64 = 1<<63 - 1
