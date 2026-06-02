@@ -1,19 +1,6 @@
 #!/usr/bin/env bash
-# Build qemu-system-riscv64 as WebAssembly and stage it under web/vendor/qemu/.
-#
-# This is the one heavy, infrequently-changing step. It needs Docker + several GB and
-# tens of minutes, so it runs on CI runners (cached) rather than every push — the
-# kernel image (honk.elf) is loaded into the emulator at runtime, so rebuilding the
-# kernel never requires rerunning this.
-#
-# Output (consumed by web/static/app.js):
-#   web/vendor/qemu/qemu-system-riscv64.js          (ES6 module; default export = init)
-#   web/vendor/qemu/qemu-system-riscv64.wasm
-#   web/vendor/qemu/qemu-system-riscv64.worker.js   (if emitted by this emscripten)
-#   web/vendor/qemu/opensbi-riscv64-generic-fw_dynamic.bin
-#
-# Pin QEMU_WASM_REF to a commit for reproducible builds. Upstreaming into QEMU proper
-# is in progress (TCI landed in QEMU 10.1); until then we build from ktock/qemu-wasm.
+# Build qemu-system-riscv64 as WebAssembly into web/vendor/qemu/ (consumed by app.js).
+# Heavy/infrequent (Docker, tens of minutes), so CI runs it, not every push.
 set -euo pipefail
 
 QEMU_WASM_REPO="${QEMU_WASM_REPO:-https://github.com/ktock/qemu-wasm.git}"
@@ -37,23 +24,21 @@ else
   git -C "$WORKDIR/qemu-wasm" checkout FETCH_HEAD
 fi
 
-# Work around upstream URL rot in the build image's pinned tarball sources.
-# zlib.net keeps only the *current* release at the top level (and only .tar.gz in
-# fossils/), so the pinned zlib-$VER.tar.xz 404s. Pull it from the GitHub release.
-echo ">> patching Dockerfile for rotted zlib URL"
+# The pinned zlib-$VER.tar.xz 404s (zlib.net keeps only the current release); use the
+# GitHub release .tar.gz instead.
+echo ">> patching rotted zlib URL in Dockerfile"
 sed -i.bak -E \
   -e 's@https://zlib\.net/zlib-\$ZLIB_VERSION\.tar\.xz@https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/zlib-$ZLIB_VERSION.tar.gz@' \
   -e 's@tar xJC /zlib@tar xzC /zlib@' \
   "$WORKDIR/qemu-wasm/Dockerfile"
-grep -n 'zlib' "$WORKDIR/qemu-wasm/Dockerfile" | head -3
 
 echo ">> building emscripten build image"
 docker build -t honk-buildqemu - <"$WORKDIR/qemu-wasm/Dockerfile"
 
 echo ">> starting build container"
 docker rm -f "$BUILD_CTR" 2>/dev/null || true
-# Mounted writable (not :ro) so meson can materialise the dtc/* wrap subprojects
-# (libfdt is required for the riscv 'virt' machine) into subprojects/ during configure.
+# Writable mount (not :ro) so meson can materialise the dtc/libfdt wrap subprojects
+# (required for the riscv 'virt' machine) during configure.
 docker run --rm -d --name "$BUILD_CTR" -v "$WORKDIR/qemu-wasm":/qemu/ honk-buildqemu
 
 echo ">> emconfigure + emmake qemu-system-riscv64 (this is the slow part)"
@@ -66,8 +51,7 @@ docker exec "$BUILD_CTR" emmake make -j"$(nproc 2>/dev/null || echo 4)" qemu-sys
 
 echo ">> staging artifacts into $OUT"
 mkdir -p "$OUT"
-# Emscripten names the JS output after the target (no extension); rename to .js so it
-# imports as an ES module. app.js uses locateFile to find the siblings below.
+# Rename the extensionless emscripten output to .js so it imports as an ES module.
 docker cp "$BUILD_CTR":/build/qemu-system-riscv64 "$OUT/qemu-system-riscv64.js"
 docker cp "$BUILD_CTR":/build/qemu-system-riscv64.wasm "$OUT/qemu-system-riscv64.wasm"
 docker cp "$BUILD_CTR":/build/qemu-system-riscv64.worker.js "$OUT/qemu-system-riscv64.worker.js" 2>/dev/null \

@@ -1,120 +1,102 @@
-// Tier 2: boot the real honk.elf inside QEMU compiled to WebAssembly, wired to an
-// xterm.js terminal through xterm-pty. Loaded on demand by replay.js.
-//
-// CONTRACT with the build (web/build-qemu-wasm.sh):
-//   - ./vendor/qemu/qemu-system-riscv64.js is an ES6 module (-sEXPORT_ES6=1) whose
-//     default export initialises the Emscripten Module.
-//   - Its .wasm / .worker.js siblings sit next to it (resolved via locateFile).
-//   - The OpenSBI firmware ships as a plain file next to them.
-//   - Neither honk.elf nor the firmware is baked into the bundle: we fetch both at
-//     runtime and drop them into the in-memory FS, so a kernel rebuild never requires
-//     recompiling QEMU, and there is no file_packager/global-Module coupling.
+const $ = (id) => document.getElementById(id);
+const replayEl = $("replay");
+const termEl = $("terminal");
+const launchBtn = $("launch");
+const setStatus = (m) => ($("status").textContent = m);
+const qemuDir = new URL("./vendor/qemu/", document.baseURI);
 
-// xterm.js and xterm-pty ship as UMD globals (Terminal, openpty). Load them lazily.
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
+let replayTimer;
+async function playReplay() {
+  clearInterval(replayTimer);
+  replayEl.textContent = "";
+  const lines = (await (await fetch("./cast/honk-boot.log")).text()).replace(/\n+$/, "").split("\n");
+  let i = 0;
+  replayTimer = setInterval(() => {
+    if (i >= lines.length) return clearInterval(replayTimer);
+    replayEl.append(lines[i++] + "\n");
+    replayEl.scrollTop = replayEl.scrollHeight;
+  }, 45);
+}
+
+const bundleReady = fetch(new URL("qemu-system-riscv64.wasm", qemuDir), { method: "HEAD" })
+  .then((r) => r.ok)
+  .catch(() => false);
+
+const loadScript = (src) =>
+  new Promise((ok, fail) => {
     const s = document.createElement("script");
     s.src = src;
-    s.onload = resolve;
-    s.onerror = () => reject(new Error("failed to load " + src));
-    document.head.appendChild(s);
+    s.onload = ok;
+    s.onerror = () => fail(new Error("load failed: " + src));
+    document.head.append(s);
   });
-}
 
-// `booted` latches only after a boot has *succeeded*, so a failed attempt (e.g. the
-// firmware 404s on a replay-only deployment) can be retried and re-surface its error
-// instead of wedging the UI on "loading emulator…". `booting` blocks re-entry while
-// an attempt is already in flight.
-let booted = false;
-let booting = false;
+const fetchBytes = async (url) => new Uint8Array(await (await fetch(url)).arrayBuffer());
 
-export async function launchHonk(mountEl, setStatus) {
-  if (booted || booting) return;
-  booting = true;
-  try {
-    await bootHonk(mountEl, setStatus);
-    booted = true;
-  } finally {
-    booting = false;
-  }
-}
-
-async function bootHonk(mountEl, setStatus) {
+async function bootHonk() {
   await loadScript("./vendor/xterm.js");
   await loadScript("./vendor/xterm-pty.js");
 
-  const term = new Terminal({
-    cols: 80,
-    rows: 30,
-    convertEol: true,
-    fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
-    fontSize: 13,
-    theme: { background: "#000000" },
-  });
-  term.open(mountEl);
+  const term = new Terminal({ cols: 80, rows: 30, convertEol: true });
+  term.open(termEl);
   term.focus();
-  window.__honkTerm = term; // exposed so the e2e test can read the terminal buffer
+  window.__honkTerm = term; // read by the e2e test
 
-  // xterm-pty bridges the terminal to Emscripten's TTY (Module.pty).
   const { master, slave } = openpty();
   term.loadAddon(master);
 
   setStatus("fetching kernel + firmware…");
-  const qemuDir = new URL("./vendor/qemu/", document.baseURI);
   const [elf, bios] = await Promise.all([
     fetchBytes("./honk.elf"),
     fetchBytes(new URL("opensbi-riscv64-generic-fw_dynamic.bin", qemuDir).href),
   ]);
 
   setStatus("starting QEMU…");
-  const qemuUrl = new URL("qemu-system-riscv64.js", qemuDir);
-  const initQemu = (await import(qemuUrl.href)).default;
+  const qemuUrl = new URL("qemu-system-riscv64.js", qemuDir).href;
+  const initQemu = (await import(qemuUrl)).default;
 
+  // Mirrors `make run`. honk.elf/firmware are written into the in-memory FS at runtime,
+  // so a kernel rebuild never recompiles QEMU; siblings resolve via locateFile.
   const Module = {
-    // Mirrors `make run`: qemu-system-riscv64 -machine virt -m 128 -smp 1
-    //   -bios <opensbi> -nographic -no-reboot -kernel honk.elf
-    arguments: [
-      "-machine", "virt",
-      "-m", "128",
-      "-smp", "1",
-      "-bios", "/opensbi.bin",
-      "-nographic",
-      "-no-reboot",
-      "-kernel", "/honk.elf",
-      "-accel", "tcg,tb-size=500",
-    ],
+    arguments: ["-machine", "virt", "-m", "128", "-smp", "1", "-bios", "/opensbi.bin",
+      "-nographic", "-no-reboot", "-kernel", "/honk.elf", "-accel", "tcg,tb-size=500"],
     pty: slave,
-    mainScriptUrlOrBlob: qemuUrl.href,
-    // The JS is renamed to .js for ESM import, so tell Emscripten where its
-    // .wasm/.worker.js (referenced by their build-time basenames) actually live.
-    locateFile: (path) => new URL(path, qemuDir).href,
-    preRun: [
-      function () {
-        // `this` is the Module; FS is attached by the time preRun fires.
-        Module.FS.writeFile("/honk.elf", elf);
-        Module.FS.writeFile("/opensbi.bin", bios);
-      },
-    ],
-    onExit: () => setStatus("machine powered off — reload to boot again."),
-    printErr: (line) => console.warn("[qemu]", line),
+    mainScriptUrlOrBlob: qemuUrl,
+    locateFile: (p) => new URL(p, qemuDir).href,
+    preRun: [() => {
+      Module.FS.writeFile("/honk.elf", elf);
+      Module.FS.writeFile("/opensbi.bin", bios);
+    }],
   };
-
   await initQemu(Module);
 
-  // Make the TTY poll non-blocking under ASYNCIFY so keystrokes flow (matches the
-  // upstream qemu-wasm sample). TTY/FS are exported by the build's EXPORTED_RUNTIME_METHODS.
-  try {
-    const oldPoll = Module.TTY.stream_ops.poll;
-    Module.TTY.stream_ops.poll = (stream) => oldPoll.call(stream, 0);
-  } catch {
-    /* older/newer emscripten may not expose TTY.poll; non-fatal */
-  }
+  // Non-blocking TTY poll under ASYNCIFY so keystrokes flow.
+  const poll = Module.TTY.stream_ops.poll;
+  Module.TTY.stream_ops.poll = (s) => poll.call(s, 0);
 
   setStatus("running — click the terminal and type `help`.");
 }
 
-async function fetchBytes(url) {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(url + " missing (" + resp.status + ")");
-  return new Uint8Array(await resp.arrayBuffer());
+async function launchLive() {
+  launchBtn.disabled = true;
+  if (!(await bundleReady)) return setStatus("live emulator not built in this deployment — the replay still works.");
+  if (!self.crossOriginIsolated) return setStatus("cross-origin isolation unavailable — the replay still works.");
+  setStatus("loading emulator…");
+  clearInterval(replayTimer);
+  replayEl.hidden = true;
+  termEl.hidden = false;
+  try {
+    await bootHonk();
+  } catch (e) {
+    setStatus("failed to start emulator: " + e.message);
+    termEl.hidden = true;
+    replayEl.hidden = false;
+    launchBtn.disabled = false;
+  }
 }
+
+$("replay-again").addEventListener("click", playReplay);
+launchBtn.addEventListener("click", launchLive);
+playReplay();
+bundleReady.then((ok) => ok || (launchBtn.disabled = true));
+if (new URLSearchParams(location.search).has("live") && self.crossOriginIsolated) launchLive();
