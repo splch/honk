@@ -63,6 +63,8 @@ func hwinit0() {}
 //
 //go:linkname hwinit1 runtime/goos.Hwinit1
 func hwinit1() {
+	setTrapVector()  // S-mode fault handler (RV64.md Part 3)
+	enableTimerIRQ() // sie.STIE, so the timer can wake wfi (RV64.md Part 4)
 	goos.Exit = exit
 	goos.Idle = idle
 	probe()
@@ -73,17 +75,22 @@ const maxInt64 = 1<<63 - 1
 // exit powers the machine off via SBI; honk has no caller to return to.
 func exit(int32) { sbi.Shutdown() }
 
-// idle is the runtime's CPU idle governor. The Go runtime advances time via the
-// free-running `time` counter (see nanotime), so finite sleeps resolve by
-// re-polling — we simply return. A request to idle until math.MaxInt64 means no
-// goroutine will ever run again, so power off cleanly via SBI.
-//
-// TODO(phase1): replace busy-polling with a real S-timer (SBI set_timer / Sstc)
-// + wfi once the trap handler lands (RV64.md Part 4).
+// idle is the runtime's CPU idle governor (called with the absolute nanotime
+// deadline of the next pending timer, or math.MaxInt64 if none). It arms the
+// S-timer at the deadline and waits in low-power wfi until it fires; the
+// free-running `time` counter (see nanotime) then resolves the sleep when the
+// scheduler re-polls. A deadline of math.MaxInt64 means no goroutine will ever
+// run again, so power off cleanly via SBI.
 func idle(until int64) {
-	if until == maxInt64 {
+	switch {
+	case until == maxInt64:
 		sbi.Shutdown()
+	case until > nanotime():
+		sbi.SetTimer(uint64(until) / nsPerTick) // arm S-timer at the deadline
+		wfi()                                   // sleep until the timer is pending
 	}
+	// Otherwise the deadline has passed (or there is none): return and let the
+	// scheduler re-poll the `time` clock.
 }
 
 // probe parses the firmware device tree and records the discovered hardware,
