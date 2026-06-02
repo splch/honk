@@ -423,6 +423,14 @@ defensible security posture that a C kernel can't get for free — and it costs 
 only the one-time `sfence.vma`-bracketed `satp` switch (RV64.md §5.2), run from
 identity-mapped code so the next instruction stays mapped (Appendix F #9).
 
+> **Realized (see §14).** `internal/board/virt/vm.go` builds an identity Sv39
+> table — a 1 GiB gigapage for MMIO, 2 MiB megapages for the heap/stack, and
+> 4 KiB pages only across the text-bearing megapage so `[text, etext)` (from
+> `runtime.TextRegion()`) is `R|X` and everything else is `R|W`-NX, A/D preset
+> (~36 KiB of tables total). Verified live: a deliberate store into the text
+> segment now faults (`scause=0xf`, store page fault) and is reported by the
+> trap handler, where in bare mode it had silently succeeded.
+
 ---
 
 ## 10. Best practices from GO.md, applied

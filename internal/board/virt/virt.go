@@ -68,6 +68,7 @@ func hwinit1() {
 	goos.Exit = exit
 	goos.Idle = idle
 	probe()
+	enablePaging() // Sv39 identity map with W^X (RV64.md Part 5, DESIGN.md §9)
 }
 
 const maxInt64 = 1<<63 - 1
