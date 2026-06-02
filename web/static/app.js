@@ -21,12 +21,25 @@ function loadScript(src) {
   });
 }
 
+// `booted` latches only after a boot has *succeeded*, so a failed attempt (e.g. the
+// firmware 404s on a replay-only deployment) can be retried and re-surface its error
+// instead of wedging the UI on "loading emulator…". `booting` blocks re-entry while
+// an attempt is already in flight.
 let booted = false;
+let booting = false;
 
 export async function launchHonk(mountEl, setStatus) {
-  if (booted) return;
-  booted = true;
+  if (booted || booting) return;
+  booting = true;
+  try {
+    await bootHonk(mountEl, setStatus);
+    booted = true;
+  } finally {
+    booting = false;
+  }
+}
 
+async function bootHonk(mountEl, setStatus) {
   await loadScript("./vendor/xterm.js");
   await loadScript("./vendor/xterm-pty.js");
 
