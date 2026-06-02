@@ -106,8 +106,20 @@ type Block struct {
 
 	lastUsed uint16
 	capacity uint64 // sectors
+}
 
-	keep [][]byte // pin DMA allocations against the GC
+// dmaKeep pins every DMA allocation for the life of the program so the GC never
+// reclaims memory the device may write to.
+var dmaKeep [][]byte
+
+// dmaPage returns a page-aligned, GC-pinned page and its physical address
+// (== virtual, under honk's identity map).
+func dmaPage() (page []byte, pa uint64) {
+	raw := make([]byte, 2*pageSize) // alignment slack
+	dmaKeep = append(dmaKeep, raw)
+	addr := uintptr(unsafe.Pointer(&raw[0]))
+	off := int((-addr) & (pageSize - 1))
+	return raw[off : off+pageSize], uint64(addr) + uint64(off)
 }
 
 // MagicValue/DeviceID let a caller probe an mmio slot before committing to it.
@@ -227,24 +239,16 @@ func (b *Block) ReadAt(p []byte, off int64) (int, error) {
 // request buffers; under honk's identity map each region's virtual address is
 // also its physical address.
 func (b *Block) allocDMA() {
-	q, qpa := b.dmaPage()
+	q, qpa := dmaPage()
 	b.desc = (*[queueSize]virtqDesc)(unsafe.Pointer(&q[0]))
 	b.avail = (*virtqAvail)(unsafe.Pointer(&q[256]))
 	b.used = (*virtqUsed)(unsafe.Pointer(&q[512]))
 	b.descPA, b.availPA, b.usedPA = qpa, qpa+256, qpa+512
 	b.usedIdxPA = uintptr(qpa) + 512 + 2 // &used.Idx
 
-	r, rpa := b.dmaPage()
+	r, rpa := dmaPage()
 	b.hdr = (*blkReqHeader)(unsafe.Pointer(&r[0]))
 	b.status = (*byte)(unsafe.Pointer(&r[16]))
 	b.data = (*[SectorSize]byte)(unsafe.Pointer(&r[512]))
 	b.hdrPA, b.statusPA, b.dataPA = rpa, rpa+16, rpa+512
-}
-
-func (b *Block) dmaPage() (page []byte, pa uint64) {
-	raw := make([]byte, 2*pageSize) // alignment slack
-	b.keep = append(b.keep, raw)
-	addr := uintptr(unsafe.Pointer(&raw[0]))
-	off := int((-addr) & (pageSize - 1))
-	return raw[off : off+pageSize], uint64(addr) + uint64(off)
 }

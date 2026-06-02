@@ -52,8 +52,9 @@ internal/sbi/        # SBI firmware ecall wrappers
 internal/mmio/       # volatile MMIO accessors (asm)
 internal/uart/       # NS16550A driver
 internal/plic/       # PLIC interrupt-controller driver
-internal/virtio/     # virtio-mmio v2 block driver (io.ReaderAt)
-internal/board/virt/ # S-mode-under-OpenSBI board: runtime seam, trap, vm, console, disk
+internal/virtio/     # virtio-mmio v2 block + net drivers
+internal/inet/       # tiny IPv4 stack: Ethernet/ARP/IPv4/ICMP (host-tested)
+internal/board/virt/ # S-mode-under-OpenSBI board: runtime seam, trap, vm, console, disk, net
 disk/                # demo files tarred into the virtio-blk image
 boot/virt/           # 20-byte load-base trampoline (trampoline.s)
 boot/sifive_u/       # Phase 0 trampoline BIOS (bios.s + bios.ld)
@@ -61,8 +62,11 @@ Makefile             # toolchain + build + qemu + smoke + test (TARGET=virt|sifi
 GO.md RV64.md DESIGN.md
 ```
 
-Planned next (DESIGN.md §11): virtio-blk + a filesystem, and virtio-net + a
-userspace TCP/IP stack behind `net.SocketFunc`, in RV64.md's bringup order.
+honk has now walked the whole RV64.md bringup order. The one piece intentionally
+*not* built is a full TCP stack for stdlib `net`/`net/http`: the realistic option
+is gVisor's netstack behind `net.SocketFunc`, which would roughly 10× the binary
+and add a large dependency — against honk's small-and-simple ethos, so it is left
+as a deliberate opt-in (DESIGN.md §8/§11).
 
 ## Status
 
@@ -78,10 +82,11 @@ in `wfi` between timer deadlines (no busy-poll), and runs under an
 input driving a tiny **shell** (`help`, `ls`, `cat <file>`) at the `honk>`
 prompt: a keystroke raises a PLIC interrupt that wakes the hart from `wfi`,
 `idle` drains it into a lock-free ring, and a console goroutine runs commands.
-`ls`/`cat` read a **virtio-blk** disk (`internal/virtio`) parsed as a read-only
-filesystem with the Go stdlib `archive/tar`. Next: virtio-net + a userspace
-TCP/IP stack behind `net.SocketFunc` for `net/http` (DESIGN.md §11).
+`ls`/`cat` read a **virtio-blk** disk parsed as a read-only filesystem with the
+Go stdlib `archive/tar`, and a **virtio-net** driver + a tiny IPv4 stack
+(`internal/inet`) ARP and ping the QEMU gateway (the `net` command). Pure Go plus
+~180 lines of assembly, ~2.3 MB.
 
-**Phase 0** — runs on QEMU `sifive_u` (M-mode trampoline; the existing TamaGo
-RISC-V port). **Phase 1** (next) — a `virt` board package booting under OpenSBI,
-then drivers in RV64.md's bringup order. See DESIGN.md §4 and §14.
+**Phase 0** — also runs on QEMU `sifive_u` (M-mode trampoline; the existing
+TamaGo RISC-V port), kept as a second board to keep the driver boundaries honest.
+See DESIGN.md §4 and §14.

@@ -502,11 +502,15 @@ Net effect: steps 5 and 9–10's process machinery evaporate; the rest is RV64.m
 transcribed into idiomatic Go. The "OS" UX is a small shell goroutine (à la
 `kotama`) that spawns work as goroutines.
 
-> **Status (§14).** Steps 1–8 and 10 are implemented and validated in QEMU
-> (`make smoke TARGET=virt`); step 9 is goroutines by design. Implementation
-> note: step 8's interrupt model is the `wfi`-masked-wake + `idle`-drain of §8,
-> not a resumable `os/signal` ISR. The remaining item is **virtio-net** + a
-> userspace TCP/IP stack behind `net.SocketFunc` for `net/http`.
+> **Status (§14).** All bringup steps are implemented and validated in QEMU
+> (`make smoke TARGET=virt`): 1–8, 10 (virtio-blk + tar FS), and a **virtio-net**
+> driver with a tiny IPv4 stack (`internal/inet`) that ARPs and pings the QEMU
+> gateway. Step 9 is goroutines by design. Implementation note: step 8's
+> interrupt model is the `wfi`-masked-wake + `idle`-drain of §8, not a resumable
+> `os/signal` ISR. **Deliberately not built:** a full TCP stack for stdlib
+> `net`/`net/http` — the realistic option is gVisor's netstack behind
+> `net.SocketFunc`, which would ~10× the binary and add a large dependency,
+> against the small-and-simple ethos; left as an opt-in.
 
 ---
 

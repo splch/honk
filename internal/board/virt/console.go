@@ -120,7 +120,9 @@ func run(cmd string) {
 	switch {
 	case cmd == "":
 	case cmd == "help":
-		puts("commands: help, ls, cat <file>\r\n")
+		puts("commands: help, ls, cat <file>, net\r\n")
+	case cmd == "net":
+		netCmd()
 	case cmd == "ls":
 		if Disk == nil {
 			puts("no disk\r\n")

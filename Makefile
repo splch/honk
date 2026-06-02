@@ -43,7 +43,8 @@ ifeq ($(TARGET),virt)
   # loaded AFTER -kernel (see recipes) so the trampoline wins the load-base address
   QEMU_EXTRA := -device loader,file=$(BUILD)/trampoline.bin,addr=$(LOADBASE) \
                 -drive file=$(BUILD)/disk.img,format=raw,if=none,id=hd0 \
-                -device virtio-blk-device,drive=hd0
+                -device virtio-blk-device,drive=hd0 \
+                -netdev user,id=net0 -device virtio-net-device,netdev=net0
 else ifeq ($(TARGET),sifive_u)
   TEXT_START  := 0x80010000        # fu540 ramStart (0x80000000) + 0x10000
   TAGS        := sifive_u,semihosting
