@@ -37,6 +37,25 @@ else
   git -C "$WORKDIR/qemu-wasm" checkout FETCH_HEAD
 fi
 
+# The upstream Dockerfile fetches zlib from zlib.net, which serves only the *current*
+# release at its root path and returns an HTML error page for superseded versions
+# (e.g. 1.3.1). `curl -Ls` (no -f) then pipes that HTML into `tar xJ`, which fails with
+# "File format not recognized" and aborts the whole image build in seconds. Repoint the
+# fetch at the version-stable GitHub release asset and make curl fail loudly with
+# retries, so a transient hiccup retries instead of silently corrupting the build.
+DOCKERFILE="$WORKDIR/qemu-wasm/Dockerfile"
+echo ">> hardening the zlib download in the upstream Dockerfile"
+sed -i -E \
+  's#^RUN curl .*zlib\.net/zlib-\$ZLIB_VERSION\.tar\.xz.*#RUN curl -fLsS --retry 5 --retry-all-errors https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/zlib-$ZLIB_VERSION.tar.xz | tar xJC /zlib --strip-components=1#' \
+  "$DOCKERFILE"
+# Fail loudly if the flaky fetch is still there (upstream changed its Dockerfile and our
+# patch missed): better to stop than to fall back to the broken zlib.net download.
+if grep -q 'zlib\.net/zlib-' "$DOCKERFILE"; then
+  echo "!! zlib.net download still present after patch in $DOCKERFILE" >&2
+  echo "!! upstream Dockerfile layout changed; update the sed in web/build-qemu-wasm.sh" >&2
+  exit 1
+fi
+
 echo ">> building emscripten build image"
 docker build -t honk-buildqemu - <"$WORKDIR/qemu-wasm/Dockerfile"
 
