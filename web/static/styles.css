@@ -1,11 +1,10 @@
 :root {
   --bg: #0b0e14;
-  --panel: #11151c;
   --fg: #c7d0e0;
   --accent: #ffcf4a;
   --accent-dim: #8a7320;
   --muted: #7a8699;
-  --term-bg: #000;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 16px;
 }
 
@@ -31,7 +30,7 @@ footer {
 
 .goose {
   color: var(--accent);
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: clamp(0.7rem, 2.2vw, 0.95rem);
   line-height: 1.25;
   margin: 0 0 0.75rem;
@@ -60,7 +59,7 @@ code {
 }
 
 .terminal {
-  background: var(--term-bg);
+  background: #000;
   border: 1px solid #1f2733;
   border-radius: 8px;
   padding: 0.6rem;
@@ -73,7 +72,7 @@ code {
   white-space: pre-wrap;
   word-break: break-word;
   color: #d7dbe0;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 0.82rem;
   line-height: 1.35;
   overflow-y: auto;

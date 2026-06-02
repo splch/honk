@@ -1,17 +1,14 @@
 // Two tiers, one module:
-//   1. A zero-dependency replay of a real Honk OS boot (cast/honk-boot.log) that
-//      always works — no WASM, no SharedArrayBuffer, no cross-origin isolation.
-//   2. The live emulator: the real honk.elf booted in QEMU-WASM, wired to xterm.js
-//      via xterm-pty. Opt-in, since it pulls a multi-MB bundle and needs COOP/COEP
-//      (provided on GitHub Pages by coi-serviceworker.min.js).
+//   1. A zero-dependency replay of a real boot (cast/honk-boot.log) — always works.
+//   2. The live emulator: honk.elf in QEMU-WASM via xterm.js/xterm-pty. Opt-in; needs
+//      the multi-MB bundle and COOP/COEP (set on Pages by coi-serviceworker.min.js).
 
-const replayEl = document.getElementById("replay");
-const termEl = document.getElementById("terminal");
-const launchBtn = document.getElementById("launch");
-const replayBtn = document.getElementById("replay-again");
-const statusEl = document.getElementById("status");
+const $ = (id) => document.getElementById(id);
+const replayEl = $("replay");
+const termEl = $("terminal");
+const launchBtn = $("launch");
+const statusEl = $("status");
 const setStatus = (msg) => (statusEl.textContent = msg);
-
 const qemuDir = new URL("./vendor/qemu/", document.baseURI);
 
 // --- Tier 1: recorded boot replay -----------------------------------------
@@ -49,25 +46,20 @@ async function playReplay() {
 
 // --- Tier 2: live QEMU-WASM emulator --------------------------------------
 
-// The QEMU-WASM bundle is built in CI and absent from a replay-only deployment, so
-// probe for it once (cached) to avoid offering a launch that would 404 mid-boot.
-let bundleAvailable = null;
-async function liveBundleAvailable() {
-  if (bundleAvailable === null) {
-    bundleAvailable = await fetch(new URL("qemu-system-riscv64.wasm", qemuDir), { method: "HEAD" })
-      .then((r) => r.ok)
-      .catch(() => false);
-  }
-  return bundleAvailable;
-}
+// The bundle is built in CI and absent from a replay-only deployment; probe once so
+// the UI never offers a launch that would 404 mid-boot.
+const bundleReady = fetch(new URL("qemu-system-riscv64.wasm", qemuDir), { method: "HEAD" })
+  .then((r) => r.ok)
+  .catch(() => false);
 
 // xterm.js and xterm-pty ship as UMD globals (Terminal, openpty); load them lazily.
 const loadScript = (src) =>
   new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = () => reject(new Error("failed to load " + src));
+    const s = Object.assign(document.createElement("script"), {
+      src,
+      onload: resolve,
+      onerror: () => reject(new Error("failed to load " + src)),
+    });
     document.head.appendChild(s);
   });
 
@@ -78,8 +70,8 @@ const fetchBytes = async (url) => {
 };
 
 // Neither honk.elf nor the firmware is baked into the bundle: we fetch both at runtime
-// and drop them into the in-memory FS, so a kernel rebuild never requires recompiling
-// QEMU. The .wasm/.worker.js siblings resolve next to the renamed .js via locateFile.
+// and write them into the in-memory FS, so a kernel rebuild never recompiles QEMU. The
+// .wasm/.worker.js siblings resolve next to the renamed .js via locateFile.
 async function bootHonk() {
   await loadScript("./vendor/xterm.js");
   await loadScript("./vendor/xterm-pty.js");
@@ -140,21 +132,15 @@ async function bootHonk() {
   setStatus("running — click the terminal and type `help`.");
 }
 
-let booting = false;
 async function launchLive() {
-  if (booting) return;
-  launchBtn.disabled = true;
-  if (!(await liveBundleAvailable())) {
-    setStatus("the live emulator isn't available in this deployment (QEMU-WASM bundle not built) — the replay still works.");
-    return;
-  }
-  if (!self.crossOriginIsolated) {
-    // coi-serviceworker reloads once on first visit to install; still not isolated
-    // means the environment can't grant SharedArrayBuffer.
-    setStatus("cross-origin isolation unavailable — the live emulator needs it; the replay still works.");
-    return;
-  }
-  booting = true;
+  launchBtn.disabled = true; // synchronous, so concurrent launches can't overlap
+  if (!(await bundleReady))
+    return setStatus("live emulator not built in this deployment — the replay still works.");
+  // coi-serviceworker reloads once on first visit to install COOP/COEP; still not
+  // isolated means the environment can't grant SharedArrayBuffer.
+  if (!self.crossOriginIsolated)
+    return setStatus("cross-origin isolation unavailable — the live emulator needs it; the replay still works.");
+
   setStatus("loading emulator…");
   clearInterval(replayTimer);
   replayEl.hidden = true;
@@ -166,19 +152,17 @@ async function launchLive() {
     termEl.hidden = true;
     replayEl.hidden = false;
     launchBtn.disabled = false;
-    booting = false;
   }
 }
 
 // --- wire-up --------------------------------------------------------------
 
-replayBtn.addEventListener("click", playReplay);
+$("replay-again").addEventListener("click", playReplay);
 launchBtn.addEventListener("click", launchLive);
 playReplay();
 
-// Reflect bundle availability up front so a replay-only deployment doesn't advertise
-// a boot it can't deliver.
-liveBundleAvailable().then((ok) => {
+// A replay-only deployment shouldn't advertise a boot it can't deliver.
+bundleReady.then((ok) => {
   if (!ok) {
     launchBtn.disabled = true;
     launchBtn.title = "Live emulator not built in this deployment — the replay still works.";
