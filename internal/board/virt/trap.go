@@ -4,18 +4,21 @@ package virt
 
 import "github.com/splch/honk/internal/sbi"
 
-// implemented in trap_riscv64.s
-func setTrapVector()
+// implemented in trap_riscv64.s. The S-mode trap vector (stvec) and wfi come
+// from tamago/riscv64 (cpu.SetSupervisorExceptionHandler, cpu.WaitInterrupt);
+// honk keeps its own sie-only enables because it masks sstatus.SIE (see below).
 func enableTimerIRQ()
 func enableExtIRQ()
-func wfi()
 func readSCause() uint64
 func readSEPC() uint64
 func readSTVAL() uint64
 
 const sCauseInterrupt = 1 << 63 // scause top bit: 1 = interrupt, 0 = exception
 
-// trapVector is honk's S-mode trap handler, installed in stvec by setTrapVector.
+// trapVector is honk's S-mode trap handler, installed in stvec via
+// cpu.SetSupervisorExceptionHandler (hwinit1). It is preferred over tamago's
+// DefaultSupervisorExceptionHandler because honk reports stval and halts
+// cleanly through SBI rather than panicking.
 // It is the raw trap entry (no register save, no sret). Because honk keeps
 // sstatus.SIE = 0, maskable interrupts never trap (they only wake wfi; see
 // idle), so this is reached only for synchronous EXCEPTIONS — faults with

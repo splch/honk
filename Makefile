@@ -35,7 +35,9 @@ GOENV := GOOS=tamago GOARCH=riscv64 GOOSPKG=$(GOOSPKG)
 ifeq ($(TARGET),virt)
   TEXT_START  := 0x80210000        # RamStart (0x80200000) + 0x10000, above OpenSBI
   LOADBASE    := 0x8020f000        # TEXT_START - 0x1000: ELF-header page OpenSBI enters
-  TAGS        := virt
+  # linkcpuinit: use honk's S-mode cpuinit (boot_riscv64.s) instead of the
+  # machine-mode one in tamago/riscv64 (imported for riscv64.CPU; see time.go).
+  TAGS        := virt,linkcpuinit
   # honk has no RTC; inject the build time so the wall clock is plausible for TLS
   # (DESIGN.md §15.5). NTP refines it at runtime.
   LDX         := -X 'github.com/splch/honk/internal/board/virt.buildUnixStr=$(shell date +%s)'

@@ -51,11 +51,10 @@ var (
 	TimebaseHz uint32
 )
 
-// hwinit0 is the pre-runtime hook; cpuinit (boot_riscv64.s) already did the CPU
-// bring-up, so nothing more is required before the world starts.
-//
-//go:linkname hwinit0 runtime/goos.Hwinit0
-func hwinit0() {}
+// The pre-runtime hook (runtime/goos.Hwinit0) is provided by tamago/riscv64 as
+// an empty function; honk's S-mode CPU bring-up happens earlier, in cpuinit
+// (boot_riscv64.s), which overrides tamago's machine-mode cpuinit via the
+// linkcpuinit build tag (see the Makefile).
 
 // hwinit1 is the post-bootstrap hook (the Go world is up, so allocation and
 // function calls are safe): wire up firmware-backed termination/idle and probe
@@ -63,8 +62,8 @@ func hwinit0() {}
 //
 //go:linkname hwinit1 runtime/goos.Hwinit1
 func hwinit1() {
-	setTrapVector()  // S-mode fault handler (RV64.md Part 3)
-	enableTimerIRQ() // sie.STIE, so the timer can wake wfi (RV64.md Part 4)
+	cpu.SetSupervisorExceptionHandler(trapVector) // S-mode fault handler (RV64.md Part 3)
+	enableTimerIRQ()                              // sie.STIE, so the timer can wake wfi (RV64.md Part 4)
 	goos.Exit = exit
 	goos.Idle = idle
 	probe()
@@ -99,7 +98,7 @@ func idle(until int64) {
 		}
 		sbi.SetTimer(timerTicks(until)) // wake at the deadline (raw timer ticks)
 	}
-	wfi() // woken by the timer (if armed) or by UART input
+	cpu.WaitInterrupt() // wfi: woken by the timer (if armed) or by UART input
 }
 
 // probe parses the firmware device tree and records the discovered hardware,
