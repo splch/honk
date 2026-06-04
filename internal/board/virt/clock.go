@@ -3,6 +3,7 @@
 package virt
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 
@@ -40,6 +41,17 @@ func ntpSync(host string) (time.Time, error) {
 	r, err := ntp.Query(host)
 	if err != nil {
 		return time.Time{}, err
+	}
+	// honk's wall clock and the runtime's monotonic clock are the SAME counter
+	// (tamago exposes no separate walltime seam), so an NTP step also moves
+	// monotonic time. Moving forward is safe (timers just fire early); refuse a
+	// large backward step, which would make time.Since negative and stall armed
+	// timers. The build-time seed already puts the clock within a small forward
+	// error, so legitimate corrections are forward or tiny.
+	const maxBackstep = 2 * time.Second
+	if r.ClockOffset < -maxBackstep {
+		return time.Time{}, fmt.Errorf("ntp: backward offset %s exceeds %s; refusing (shared monotonic clock)",
+			r.ClockOffset.Round(time.Millisecond), maxBackstep)
 	}
 	now := time.Now().Add(r.ClockOffset)
 	SetWallClock(now.UnixNano())

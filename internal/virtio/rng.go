@@ -38,11 +38,14 @@ func NewRNG(base uintptr) (*RNG, error) {
 	mmio.W32(base+regStatus, 0)
 	st := uint32(statusAck | statusDriver)
 	mmio.W32(base+regStatus, st)
-	// The entropy device defines no feature bits we need; negotiate none.
+	// Negotiate VIRTIO_F_VERSION_1 (word 1, required for v2 devices, §6.1); the
+	// entropy device defines no other feature bits we need.
+	mmio.W32(base+regDeviceFeatSel, 1)
+	hi := mmio.R32(base + regDeviceFeat)
 	mmio.W32(base+regDriverFeatSel, 0)
 	mmio.W32(base+regDriverFeat, 0)
 	mmio.W32(base+regDriverFeatSel, 1)
-	mmio.W32(base+regDriverFeat, 0)
+	mmio.W32(base+regDriverFeat, hi&featVersion1)
 	st |= statusFeaturesOK
 	mmio.W32(base+regStatus, st)
 	if mmio.R32(base+regStatus)&statusFeaturesOK == 0 {

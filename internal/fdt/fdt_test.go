@@ -58,6 +58,7 @@ func buildFDT() []byte {
 	prop("timebase-frequency", u32(10_000_000))
 	begin("cpu@0")
 	prop("device_type", str("cpu"))
+	prop("riscv,isa-extensions", append(str("sstc"), str("zicsr")...)) // stringlist
 	end()
 	end()
 	end() // root
@@ -97,6 +98,21 @@ func TestParse(t *testing.T) {
 	}
 	if n := tr.HartCount(); n != 1 {
 		t.Errorf("HartCount() = %d, want 1", n)
+	}
+}
+
+func TestHartHasExtension(t *testing.T) {
+	tr, err := Parse(buildFDT())
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, ext := range []string{"sstc", "zicsr"} {
+		if !tr.HartHasExtension(ext) {
+			t.Errorf("HartHasExtension(%q) = false, want true", ext)
+		}
+	}
+	if tr.HartHasExtension("v") {
+		t.Error("HartHasExtension(\"v\") = true, want false")
 	}
 }
 

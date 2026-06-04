@@ -207,6 +207,37 @@ func (t *Tree) TimebaseFrequency() (uint32, bool) {
 	return 0, false
 }
 
+// HartHasExtension reports whether any /cpus cpu node advertises the named ISA
+// extension, via either "riscv,isa-extensions" (a device-tree stringlist) or
+// "riscv,isa" (an underscore-separated ISA string, e.g. "rv64imafdc_sstc").
+// Used to detect Sstc (direct S-mode stimecmp timer) before relying on it.
+func (t *Tree) HartHasExtension(name string) bool {
+	cpus := t.Root.Child("cpus")
+	if cpus == nil {
+		return false
+	}
+	for _, c := range cpus.Children {
+		if dt, _ := c.PropString("device_type"); dt != "cpu" {
+			continue
+		}
+		if v, ok := c.Prop("riscv,isa-extensions"); ok {
+			for _, ext := range stringList(v) {
+				if ext == name {
+					return true
+				}
+			}
+		}
+		if isa, ok := c.PropString("riscv,isa"); ok {
+			for _, tok := range strings.Split(isa, "_") {
+				if tok == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // HartCount returns the number of enabled harts (device_type="cpu" under /cpus).
 func (t *Tree) HartCount() int {
 	cpus := t.Root.Child("cpus")
@@ -238,6 +269,22 @@ func readCells(b []byte) uint64 {
 }
 
 func align4(n int) int { return (n + 3) &^ 3 }
+
+// stringList splits a device-tree stringlist property (concatenated
+// NUL-terminated strings) into its elements.
+func stringList(b []byte) []string {
+	var out []string
+	start := 0
+	for i, c := range b {
+		if c == 0 {
+			if i > start {
+				out = append(out, string(b[start:i]))
+			}
+			start = i + 1
+		}
+	}
+	return out
+}
 
 func cstr(b []byte, off int) string {
 	if off < 0 || off >= len(b) {

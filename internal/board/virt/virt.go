@@ -51,6 +51,11 @@ var (
 	TimebaseHz uint32
 )
 
+// sstc reports whether the hart implements the Sstc extension (direct S-mode
+// stimecmp timer), detected from the DTB; idle then arms the timer without an
+// SBI ecall.
+var sstc bool
+
 // The pre-runtime hook (runtime/goos.Hwinit0) is provided by tamago/riscv64 as
 // an empty function; honk's S-mode CPU bring-up happens earlier, in cpuinit
 // (boot_riscv64.s), which overrides tamago's machine-mode cpuinit via the
@@ -67,6 +72,12 @@ func hwinit1() {
 	goos.Exit = exit
 	goos.Idle = idle
 	probe()
+	if TimebaseHz != 0 {
+		// Drive the clock from the DTB-reported tick rate instead of the
+		// hardcoded 10 MHz default, so the same image keeps correct time on
+		// boards with a different timebase (RV64.md Part 7.1).
+		cpu.TimerMultiplier = 1e9 / float64(TimebaseHz)
+	}
 	enablePaging() // Sv39 identity map with W^X (RV64.md Part 5, DESIGN.md §9)
 	initClock()    // seed the wall clock from build time, before any timers (DESIGN.md §15.5)
 	initEntropy()  // virtio-rng FIRST: seed crypto/rand before any key (DESIGN.md §15.4)
@@ -96,7 +107,11 @@ func idle(until int64) {
 		if until <= nanotime() {
 			return // the deadline has passed; a goroutine is ready to run
 		}
-		sbi.SetTimer(timerTicks(until)) // wake at the deadline (raw timer ticks)
+		if sstc {
+			setSTimecmp(timerTicks(until)) // direct S-mode timer, no SBI ecall (Sstc)
+		} else {
+			sbi.SetTimer(timerTicks(until)) // wake at the deadline (raw timer ticks)
+		}
 	}
 	cpu.WaitInterrupt() // wfi: woken by the timer (if armed) or by UART input
 }
@@ -113,6 +128,7 @@ func probe() {
 	RAMBase, RAMSize, _ = t.Memory()
 	TimebaseHz, _ = t.TimebaseFrequency()
 	Harts = t.HartCount()
+	sstc = t.HartHasExtension("sstc")
 
 	print("honk/virt: ", Model, ", ", Harts, " hart(s), RAM ",
 		int(RAMSize>>20), " MiB, timebase ", int(TimebaseHz)/1_000_000, " MHz\n")

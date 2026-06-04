@@ -50,3 +50,9 @@ func timerTicks(deadline int64) uint64 {
 }
 
 func readTime() uint64 // time_riscv64.s
+
+// setSTimecmp writes the supervisor timer-compare CSR (stimecmp, 0x14D, from the
+// Sstc extension), arming the next S-timer interrupt directly from S-mode with no
+// SBI ecall. Only used when the DTB advertises Sstc (idle); otherwise honk falls
+// back to sbi.SetTimer. time_riscv64.s.
+func setSTimecmp(ticks uint64)

@@ -68,6 +68,7 @@ func initDisk() {
 			return
 		}
 		seedFS(f)
+		disk.Flush() // commit the format + motd to the backing image
 		puts("honk/virt: formatted FAT32 disk\n")
 	}
 	FS = f
@@ -128,5 +129,8 @@ func WriteFile(name string, data []byte) error {
 		f.Close()
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return disk.Flush() // commit to non-volatile storage (no-op if no write cache)
 }

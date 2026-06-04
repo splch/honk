@@ -13,11 +13,12 @@ const (
 	deviceNet  = 1
 	netFeatMAC = 1 << 5 // VIRTIO_NET_F_MAC
 
-	// virtio-net header prepended to every frame. QEMU uses the 10-byte header
-	// (no num_buffers) when VIRTIO_NET_F_MRG_RXBUF is not negotiated, which honk
-	// does not negotiate; confirmed on the wire (a 12-byte assumption leaves 2
-	// stray header bytes in front of the Ethernet frame).
-	netHdrLen    = 10
+	// virtio-net header prepended to every frame. honk negotiates
+	// VIRTIO_F_VERSION_1 (modern mode), in which struct virtio_net_hdr always
+	// includes the num_buffers field and is therefore 12 bytes, even though
+	// VIRTIO_NET_F_MRG_RXBUF is not negotiated (VIRTIO spec §5.1.6.1; in the older
+	// transitional mode without that feature the header was 2 bytes shorter).
+	netHdrLen    = 12
 	frameBufSize = 2048 // RX buffer: net header + a full Ethernet frame
 )
 
@@ -77,13 +78,16 @@ func NewNet(base uintptr) (*Net, error) {
 	st := uint32(statusAck | statusDriver)
 	mmio.W32(base+regStatus, st)
 
-	// Negotiate only VIRTIO_NET_F_MAC (read the address from config space).
+	// Negotiate VIRTIO_NET_F_MAC (word 0, read the address from config space) and
+	// VIRTIO_F_VERSION_1 (word 1, required for v2 devices, §6.1).
 	mmio.W32(base+regDeviceFeatSel, 0)
 	dev := mmio.R32(base + regDeviceFeat)
+	mmio.W32(base+regDeviceFeatSel, 1)
+	devHi := mmio.R32(base + regDeviceFeat)
 	mmio.W32(base+regDriverFeatSel, 0)
 	mmio.W32(base+regDriverFeat, dev&netFeatMAC)
 	mmio.W32(base+regDriverFeatSel, 1)
-	mmio.W32(base+regDriverFeat, 0)
+	mmio.W32(base+regDriverFeat, devHi&featVersion1)
 	st |= statusFeaturesOK
 	mmio.W32(base+regStatus, st)
 	if mmio.R32(base+regStatus)&statusFeaturesOK == 0 {

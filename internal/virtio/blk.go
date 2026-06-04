@@ -49,11 +49,18 @@ const (
 	descNext  = 1 // buffer continues in Next
 	descWrite = 2 // device writes this buffer
 
-	blkTypeIn  = 0   // read
-	blkTypeOut = 1   // write
-	SectorSize = 512 // bytes
-	queueSize  = 8   // descriptors per queue (power of two)
-	pageSize   = 4096
+	// featVersion1 is VIRTIO_F_VERSION_1 (feature bit 32 = bit 0 of the second
+	// feature word). VIRTIO 1.x requires v2 (modern) MMIO drivers to negotiate
+	// it; a compliant device may refuse FEATURES_OK otherwise (spec §6.1).
+	featVersion1 = 1 << 0
+
+	blkTypeIn    = 0      // read
+	blkTypeOut   = 1      // write
+	blkTypeFlush = 4      // VIRTIO_BLK_T_FLUSH: commit the volatile write cache
+	blkFeatFlush = 1 << 9 // VIRTIO_BLK_F_FLUSH (word 0): device has a write cache
+	SectorSize   = 512    // bytes
+	queueSize    = 8      // descriptors per queue (power of two)
+	pageSize     = 4096
 )
 
 type virtqDesc struct {
@@ -104,8 +111,9 @@ type Block struct {
 	hdrPA, statusPA, dataPA uint64
 	usedIdxPA               uintptr // for a volatile poll of used.Idx
 
-	lastUsed uint16
-	capacity uint64 // sectors
+	lastUsed  uint16
+	capacity  uint64 // sectors
+	flushable bool   // device has a volatile write cache (VIRTIO_BLK_F_FLUSH)
 }
 
 // dmaKeep pins every DMA allocation for the life of the program so the GC never
@@ -152,11 +160,18 @@ func New(base uintptr) (*Block, error) {
 	st := uint32(statusAck | statusDriver)
 	mmio.W32(base+regStatus, st)
 
-	// Negotiate no optional features (the legacy read/write path needs none).
+	// Negotiate VIRTIO_F_VERSION_1 (required for v2 devices, §6.1) and, if the
+	// device exposes a volatile write cache, VIRTIO_BLK_F_FLUSH so writes can be
+	// committed durably (Flush). Mask against what the device offers.
+	mmio.W32(base+regDeviceFeatSel, 0)
+	lo := mmio.R32(base + regDeviceFeat)
+	mmio.W32(base+regDeviceFeatSel, 1)
+	hi := mmio.R32(base + regDeviceFeat)
+	b.flushable = lo&blkFeatFlush != 0
 	mmio.W32(base+regDriverFeatSel, 0)
-	mmio.W32(base+regDriverFeat, 0)
+	mmio.W32(base+regDriverFeat, lo&blkFeatFlush)
 	mmio.W32(base+regDriverFeatSel, 1)
-	mmio.W32(base+regDriverFeat, 0)
+	mmio.W32(base+regDriverFeat, hi&featVersion1)
 	st |= statusFeaturesOK
 	mmio.W32(base+regStatus, st)
 	if mmio.R32(base+regStatus)&statusFeaturesOK == 0 {
@@ -290,6 +305,39 @@ func (b *Block) WriteAt(p []byte, off int64) (int, error) {
 		n += m
 	}
 	return n, nil
+}
+
+// Flush issues a VIRTIO_BLK_T_FLUSH so the device commits completed writes to
+// non-volatile storage. It is a no-op when the device has no volatile write
+// cache (VIRTIO_BLK_F_FLUSH not negotiated). A flush request is a 2-descriptor
+// chain: header (device reads) -> status (device writes).
+func (b *Block) Flush() error {
+	if !b.flushable {
+		return nil
+	}
+	b.hdr.Type = blkTypeFlush
+	b.hdr.Reserved = 0
+	b.hdr.Sector = 0 // MUST be 0 for a flush request
+	*b.status = 0xff
+
+	b.desc[0] = virtqDesc{Addr: b.hdrPA, Len: 16, Flags: descNext, Next: 1}
+	b.desc[1] = virtqDesc{Addr: b.statusPA, Len: 1, Flags: descWrite, Next: 0}
+
+	b.avail.Ring[b.avail.Idx%queueSize] = 0
+	mmio.Fence()
+	b.avail.Idx++
+	mmio.Fence()
+	mmio.W32(b.base+regQueueNotify, 0)
+
+	for mmio.R16(b.usedIdxPA) == b.lastUsed {
+	}
+	b.lastUsed++
+	mmio.Fence()
+
+	if mmio.R8(uintptr(b.statusPA)) != 0 {
+		return errors.New("virtio: block flush failed")
+	}
+	return nil
 }
 
 // allocDMA reserves page-aligned, GC-pinned DMA memory for the virtqueue and the
