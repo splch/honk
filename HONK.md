@@ -295,6 +295,15 @@ is front-loaded; the OS logic on top of it is small because it is Go.
      M0. See `docs/STATUS.md`.
 2. **M1 IRQ + console + shell.** Trap-vector hook routes IRQs to channels;
    `tamago-example/shell` over UART; clean panic with `scause`/`sepc`/`stval`.
+   - *Status:* **COMPLETE + verified.** honk installs its own S-mode trap
+     vector on every hart (TamaGo's riscv64 handler is M-mode and never does a
+     real trap return). UART RX interrupt -> PLIC -> trap -> lock-free ring ->
+     reader goroutine -> `virt.Console()` channel; a small line shell
+     (`help`/`harts`/`uptime`/`mem`/`echo`/`fault`/`exit`) runs over it.
+     S-mode exceptions print `scause`/`sepc`/`stval` and halt (the `fault`
+     command exercises this via `EBREAK`). Interrupts run on the boot hart only
+     (single PLIC consumer, no claim races); secondaries set `stvec` for
+     exception safety. See `docs/STATUS.md`.
 3. **M2 Process model.** `proc` table = goroutines + `context` + capabilities;
    `run`/`ps`/`kill`; `recover()` fault domains (a panicking app is reaped, kernel
    and siblings live); race-tested under `-smp 4`.

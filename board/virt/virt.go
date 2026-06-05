@@ -14,6 +14,7 @@ package virt
 
 import (
 	"math"
+	"time"
 	_ "unsafe"
 
 	"runtime/goos"
@@ -32,6 +33,13 @@ func BootHart() uint64 { return bootHartID }
 // DTB returns the physical address of the device tree blob OpenSBI passed in
 // a1. Parsing it (RAM size, hart count, MMIO bases) lands in a later milestone.
 func DTB() uintptr { return uintptr(bootDTB) }
+
+// Uptime returns the monotonic time since boot.
+func Uptime() time.Duration { return time.Duration(nanotime()) }
+
+// Fault deliberately raises an S-mode exception (EBREAK) to exercise the fatal
+// trap path; it prints the trap CSRs and powers off. It does not return.
+func Fault() { triggerFault() }
 
 // hwinit0 runs before the runtime World is started (no allocation possible).
 //

@@ -22,13 +22,14 @@ is downloaded and built automatically on first use.
 ## Layout
 
 ```
-kernel/        the HS-mode Go program (the OS)
-board/virt/    QEMU virt board: HS-mode startup + runtime/goos overlay + SBI
+kernel/        the HS-mode Go program (the OS): boot, SMP demo, shell
+board/virt/    QEMU virt board: HS-mode startup, SMP, traps, PLIC, UART, SBI
 tools/         build.sh, run-qemu.sh, smoke-test.sh, mkboot (boot trampoline)
 HONK.md        full design and roadmap
 docs/STATUS.md what works today and what's next
 GO.md RV64.md OS.md   language / hardware / domain references
 ```
 
-Status: **M0 complete** - HS-mode boot under OpenSBI + SMP (all harts as Go Ms,
-scheduler verified across cores) + clean shutdown. See `docs/STATUS.md`.
+Status: **M0 + M1 complete** - HS-mode boot under OpenSBI, SMP across all harts,
+and an interrupt-driven UART console with an interactive shell. `make run`
+drops you at a `honk>` prompt. See `docs/STATUS.md`.

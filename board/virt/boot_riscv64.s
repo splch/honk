@@ -38,6 +38,16 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOV	$(1<<13), T0
 	CSRRS	T0, SSTATUS, ZERO
 
+	// Install the S-mode trap vector and enable external interrupts on the
+	// boot hart. No source fires until InitConsole programs the PLIC/UART, so
+	// this is safe even before the Go runtime is up.
+	MOV	$trapEntry(SB), T0
+	CSRRW	T0, STVEC, ZERO
+	MOV	$(1<<9), T0
+	CSRRS	T0, SIE, ZERO		// sie.SEIE (S-mode external)
+	MOV	$(1<<1), T0
+	CSRRS	T0, SSTATUS, ZERO	// sstatus.SIE (global S-mode interrupts)
+
 	// Boot stack pointer at the top of usable RAM:
 	//	sp = RamStart + RamSize - RamStackOffset
 	MOV	runtime∕goos·RamStart(SB), X2
@@ -66,6 +76,11 @@ TEXT secondaryEntry(SB),NOSPLIT|NOFRAME,$0
 	// enable the FPU (sstatus.FS = Initial)
 	MOV	$(1<<13), T0
 	CSRRS	T0, SSTATUS, ZERO
+
+	// install the trap vector for exception safety (no interrupts enabled on
+	// secondary harts: only the boot hart services the UART)
+	MOV	$trapEntry(SB), T0
+	CSRRW	T0, STVEC, ZERO
 
 	SLLI	$2, X10, T4		// T4 = hartid*4 (uint32 index)
 	SLLI	$3, X10, T5		// T5 = hartid*8 (uint64 index)

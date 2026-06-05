@@ -8,8 +8,12 @@ WATCHDOG="${WATCHDOG:-30}"
 
 tools/build.sh >/dev/null
 
+# Drive the shell over the UART. The leading newline absorbs a startup byte
+# that OpenSBI may consume during its own UART init (interactive use, where the
+# user types after the prompt, is unaffected).
 SMP="${SMP:-4}"
-out="$(perl -e 'alarm shift; exec @ARGV' "$WATCHDOG" \
+out="$(printf '\nhelp\nharts\nmem\necho honk lives\nexit\n' | \
+	perl -e 'alarm shift; exec @ARGV' "$WATCHDOG" \
 	qemu-system-riscv64 -machine virt -cpu rv64,h=true -smp "$SMP" -m 512M \
 	-nographic -bios default -no-reboot \
 	-kernel boot.bin -device loader,file=honk.elf 2>&1 || true)"
@@ -28,8 +32,11 @@ honk: entered main
 honk: HS-mode boot ok
 SMP up  harts=4  GOMAXPROCS=4
 SMP OK - goroutines ran on
-goroutine+channel round-trip
-M0 ok - clean shutdown
+shell ready
+commands: help
+harts: 4 online
+honk lives
+honk: shutting down
 EOF
 
 if [ "$fail" -ne 0 ]; then

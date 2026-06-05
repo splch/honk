@@ -19,28 +19,27 @@ distribution (`tamago-go`) is auto-built on first use into the OS cache dir.
 | Milestone | State | Notes |
 |---|---|---|
 | **M0 boot + SMP + hello** | ✅ **complete** | Boots in HS-mode under OpenSBI on QEMU virt; **all harts run Go Ms** (`GOMAXPROCS=nharts`), scheduler spreads goroutines across every hart; clean SBI shutdown. Verified at `-smp 1/4/8`, boot-hart-agnostic. |
-| M1 IRQ + console + shell | ⬜ next | Trap-vector hook → channels; NS16550A UART; tamago-example/shell. |
-| M2 process model | ⬜ | `proc` table = goroutine + context + caps; `recover()` domains. |
+| **M1 IRQ + console + shell** | ✅ **complete** | honk S-mode trap vector (proper `sret`); UART RX interrupt → PLIC → ring → channel; interactive shell over the UART; S-mode exceptions print `scause`/`sepc`/`stval` and halt. |
+| M2 process model | ⬜ next | `proc` table = goroutine + context + caps; `recover()` domains. |
 
-## What boots today (M0)
+## What boots today (M0+M1)
 
-`make run` (defaults to `-smp 4`) produces:
+`make run` (defaults to `-smp 4`) boots and drops into an interactive shell:
 
 ```
-honk: entered main
-   __     honk
- >(o )___   pure-Go RISC-V64 OS
-  (  ._> /  HS-mode under OpenSBI
-   '---'
 honk: HS-mode boot ok  hart=0  dtb=0x9fe00000
 honk: SMP up  harts=4  GOMAXPROCS=4
 honk: SMP OK - goroutines ran on 4/4 harts [0 1 2 3]
-honk: goroutine+channel round-trip -> "honk"
-honk: M0 ok - clean shutdown
+
+honk: shell ready (type 'help')
+honk> harts
+harts: 4 online  GOMAXPROCS=4  this=hart 0
+honk> exit
+honk: shutting down
 ```
 
-QEMU exits 0 via SBI System Reset (not the smoke-test watchdog). The boot hart
-is whatever OpenSBI picks (not always 0); honk starts all the others.
+`exit` powers off via SBI (QEMU exits 0). The boot hart is whatever OpenSBI
+picks (not always 0); honk starts all the others.
 
 ## Boot model (the load-bearing decisions)
 
@@ -77,6 +76,33 @@ Memory map (sized for `-m 512M`, hardcoded until DTB parsing lands):
 `RamStart=0x80400000`, `RamSize=0x1DA00000` (ends below the DTB at ~0x9fe00000
 so the runtime arena/boot stack never clobber it).
 
+## Console + traps (M1) - how it works
+
+TamaGo's riscv64 trap handler is M-mode and never does a real trap return, so
+honk installs its **own** S-mode handler (`trapEntry`, trap_riscv64.s) in
+`stvec` on every hart (via cpuinit/secondaryEntry):
+
+- **Exceptions** (`scause >= 0`) are fatal: `handleFault` prints
+  `scause`/`sepc`/`stval` via the raw SBI console (alloc-free, trap-safe) and
+  powers off. The shell's `fault` command (an `EBREAK`, delegated to S-mode)
+  exercises this.
+- **Interrupts** (`scause < 0`) are serviced synchronously: the handler saves
+  the integer caller-saved registers, calls the nosplit, FP-free `handleIRQ`
+  (PLIC claim → drain UART RX into a lock-free ring → PLIC complete), restores,
+  and `sret`s. Because it fully drains + completes, the return does not storm.
+
+Interrupts are enabled (`sstatus.SIE` + `sie.SEIE`) on the **boot hart only**;
+the UART (PLIC source 10) is routed to that hart's S-context, so there is a
+single interrupt consumer and no cross-hart claim races. Secondaries set only
+`stvec` (exception safety). A reader goroutine moves bytes from the ring onto
+the `virt.Console()` channel, and `kernel/shell.go` provides a small line shell
+(`help`/`harts`/`uptime`/`mem`/`echo`/`fault`/`exit`). Output stays on the SBI
+console (`printk`).
+
+*Known benign caveat:* a byte that arrives before honk's console is initialized
+may be consumed by OpenSBI's own UART init. Interactive input (typed after the
+prompt) is unaffected; the smoke test sends a leading newline to absorb it.
+
 ## SMP (M0) - how it works
 
 The project's stated #1 risk - per-hart Go `M` bring-up - is solved, and
@@ -104,8 +130,10 @@ whatever OpenSBI selects; `InitSMP` skips it and starts all the others.
 `maxHarts` (currently 8) bounds the hand-off tables; raise it and re-test for
 larger `-smp` values.
 
-## Next: M1
+## Next: M2
 
-IRQ→channel plumbing (trap-vector hook), an NS16550A UART driver, and a shell.
-Cheap groundwork that M1 also needs: DTB parsing (hart count, RAM size, MMIO
-bases), which would also replace the hardcoded memory map and hart probing here.
+Process model: a `proc` table of goroutines + `context.Context` (cancel = kill)
++ capability sets, with `run`/`ps`/`kill` shell commands and `recover()` fault
+domains so a panicking task is reaped while the kernel and siblings survive.
+Race-tested under `-smp 4`. Cheap groundwork still pending: DTB parsing (hart
+count, RAM size, MMIO bases) to replace the hardcoded memory map and probing.

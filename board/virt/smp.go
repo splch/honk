@@ -41,7 +41,16 @@ var (
 var (
 	parkedHarts []uint64 // secondary harts parked and ready for a task
 	taskIdx     int32    // next parkedHarts index handed out by honkTask
+	numHarts    int      // total harts the runtime is using (set by InitSMP)
 )
+
+// NumHarts returns the number of harts the runtime is using (1 if SMP is off).
+func NumHarts() int {
+	if numHarts == 0 {
+		return 1
+	}
+	return numHarts
+}
 
 // implemented in boot_riscv64.s
 func readtp() uint64
@@ -86,6 +95,7 @@ func InitSMP() (nharts int) {
 	}
 
 	nharts = 1 + len(parkedHarts)
+	numHarts = nharts
 	if nharts > 1 {
 		goos.ProcID = CurrentHart
 		goos.Task = honkTask

@@ -1,9 +1,8 @@
 // honk - a modern pure-Go multiprocess RISC-V 64 operating system.
 //
-// This is the HS-mode Go program that is the whole OS. M0 proves the
-// foundation: boot as an OpenSBI S-mode payload on QEMU virt, bring every hart
-// up as a Go runtime M (SMP), exercise the scheduler across cores, and shut
-// down cleanly.
+// This is the HS-mode Go program that is the whole OS. M0 brings up the boot
+// foundation (HS-mode under OpenSBI, SMP across all harts); M1 adds the
+// interrupt-driven UART console and an interactive shell.
 
 //go:build tamago && riscv64
 
@@ -38,6 +37,10 @@ func main() {
 	nharts := virt.InitSMP()
 	fmt.Printf("honk: SMP up  harts=%d  GOMAXPROCS=%d\n", nharts, runtime.GOMAXPROCS(-1))
 
+	// Bring up the interrupt-driven UART console (M1) early, so input typed
+	// (or piped) during the demo below is captured into the channel.
+	virt.InitConsole()
+
 	// Prove the scheduler actually runs goroutines across multiple harts.
 	harts := smpDemo(nharts)
 	if len(harts) > 1 {
@@ -46,14 +49,9 @@ func main() {
 		fmt.Printf("honk: SMP single-hart - goroutines ran on %v\n", harts)
 	}
 
-	// Goroutine + channel round-trip - honk's process + IPC primitives.
-	ch := make(chan string, 1)
-	go func() { ch <- "honk" }()
-	fmt.Printf("honk: goroutine+channel round-trip -> %q\n", <-ch)
-
-	fmt.Println("honk: M0 ok - clean shutdown")
-	// Returning from main triggers runtime exit -> goos.Exit -> SBI shutdown,
-	// which stops every hart and exits QEMU.
+	// Hand off to the interactive shell over the UART (M1). It returns only on
+	// EOF; commands `exit`/`fault` power the machine off via SBI.
+	runShell(virt.Console())
 }
 
 // smpDemo runs many CPU-bound goroutines for a short window and returns the
