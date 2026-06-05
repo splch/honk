@@ -12,6 +12,7 @@ import (
 	"github.com/diskfs/go-diskfs/filesystem"
 	"github.com/diskfs/go-diskfs/filesystem/fat32"
 	"github.com/splch/honk/internal/virtio"
+	"github.com/splch/honk/internal/wasm"
 )
 
 // QEMU virt exposes 8 virtio-mmio transport slots at 0x10001000, 0x1000 apart
@@ -115,15 +116,19 @@ func validName(name string) bool {
 	return true
 }
 
-// seedFS writes honk's initial files to a freshly formatted disk.
+// seedFS writes honk's initial files to a freshly formatted disk: a motd and a
+// tiny sandboxed WebAssembly demo (run it with `run hello.wasm`).
 func seedFS(f filesystem.FileSystem) {
-	w, err := f.OpenFile("/motd", os.O_CREATE|os.O_RDWR|os.O_TRUNC)
-	if err != nil {
-		return
+	if w, err := f.OpenFile("/motd", os.O_CREATE|os.O_RDWR|os.O_TRUNC); err == nil {
+		io.WriteString(w, "honk: a small RISC-V 64-bit operating system in pure Go.\n")
+		io.WriteString(w, "This is a writable FAT32 disk; files you write here persist across reboots.\n")
+		io.WriteString(w, "Try: run hello.wasm  (a WebAssembly app in a wazero sandbox).\n")
+		w.Close()
 	}
-	io.WriteString(w, "honk: a small RISC-V 64-bit operating system in pure Go.\n")
-	io.WriteString(w, "This is a writable FAT32 disk; files you write here persist across reboots.\n")
-	w.Close()
+	if w, err := f.OpenFile("/hello.wasm", os.O_CREATE|os.O_RDWR|os.O_TRUNC); err == nil {
+		w.Write(wasm.HelloModule)
+		w.Close()
+	}
 }
 
 // listDisk writes the root directory listing to w, backing the shell `ls`

@@ -6,6 +6,7 @@ require (
 	github.com/beevik/ntp v1.5.0
 	github.com/diskfs/go-diskfs v1.9.3
 	github.com/gliderlabs/ssh v0.3.8
+	github.com/tetratelabs/wazero v1.12.0
 	github.com/usbarmory/go-net v0.0.0-20260416163630-1078311e0956
 	github.com/usbarmory/tamago v1.26.3-0.20260509064216-29100dbf75d2
 	golang.org/x/crypto v0.42.0

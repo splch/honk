@@ -650,7 +650,7 @@ workstation/services sense.
 | **0 substrate** | scheduling, memory, interrupt I/O, fault detection | ✅ (Go runtime, Sv39/W^X, PLIC/UART/timer, trap handler) |
 | **1 required** | TCP/IP, DNS, **read/write** filesystem, entropy/CSPRNG, TLS trust, time | ◻ the real gaps (RO tar FS today; no real RNG; no TCP) |
 | **2 daily/remote** | SSH remote login, HTTP services, DHCP, logging | ◻ unlocked by the Tier-1 keystone |
-| **3 optional** | framebuffer GUI, package distribution, SMP, richer app model | mostly **out of scope** by ethos (§15.6) |
+| **3 optional** | framebuffer GUI, package distribution, SMP, sandboxed app model | ◧ sandboxed wasm apps **done** (wazero, §15.5 step 8); GUI / SMP / pkg-dist out of scope by ethos (§15.6) |
 
 ### 15.3 The networking keystone
 
@@ -697,7 +697,7 @@ check (several attractive packages secretly pull `x/sys/unix`, cgo, or
 | **5 ✅** | **DNS · NTP** (DHCP deferred) | custom `net.Resolver` · `beevik/ntp` · build-time clock floor | resolver `Dial`→10.0.2.3:53; `ntp.Query`→`SetWallClock`; `-ldflags -X` build epoch | small / done |
 | **6 ✅** | **HTTP services** | stdlib `net/http` | free once the keystone is up | +3.9 MB / done |
 | **7 ✅** | **R/W filesystem** | `diskfs/go-diskfs` `filesystem/fat32` over a virtio-blk backend | `WriteAt` (RMW) on the block driver; `backend.Storage` adapter; format-on-first-boot; `ls`/`cat`/`write` | done — writable FAT32 replaces the RO tar |
-| **8** *(stretch)* | **Sandboxed apps** | `tetratelabs/wazero` | host-module capabilities; goroutines stay the default for trusted code | medium / medium (riscv64 interpreter-only, ~10× slower; tamago build unverified) |
+| **8 ✅** | **Sandboxed apps** | `tetratelabs/wazero` + `wasi_snapshot_preview1` | `internal/wasm.Run`; `run <file.wasm>` over the shared shell; WASI stdio wired to the session, nothing else granted | +2 MB / done (riscv64 interpreter-only) |
 
 Step 2 is the keystone (it unlocks 3–6); step 1 must land before it. Steps 5–7
 are independent and small. DNS is *broken by default* (no `/etc/resolv.conf`), so
@@ -747,6 +747,24 @@ RFC 1123, not optional.
 > `init()`, not `hwinit1`: go-diskfs uses `defer`, which faults on the system
 > stack (the same lesson as gVisor). The 64 MiB image keeps FAT32 host-mountable;
 > binary ~12 MB.
+
+> **Step 8 done (mid-2026)** — honk runs **sandboxed WebAssembly apps.**
+> `tetratelabs/wazero` and its `wasi_snapshot_preview1` import **build under
+> `GOOS=tamago/riscv64`** (verified before committing, per the §15.5 build-check
+> gate); riscv64 has no wazero JIT, so modules run on its pure-Go interpreter. The
+> hardware-independent `internal/wasm` package (host-unit-tested, GO.md §16) wraps
+> wazero: `Run(ctx, out, module, args…)` installs WASI with the guest's
+> stdout/stderr wired to the caller's `io.Writer` and **nothing else** — no
+> filesystem, network, stdin, or environment — so an untrusted module can only
+> compute and print. A 30 s context deadline plus `WithCloseOnContextDone` stops a
+> runaway guest from starving honk's single hart (§15.7), and a memory-page cap
+> bounds its heap. The shell gained `run <file.wasm> [args]`, and a freshly
+> formatted disk is seeded with a tiny hand-encoded `hello.wasm`. **Verified
+> live:** `run hello.wasm` prints `honk from wasm!` from inside the sandbox, the
+> module persists across reboots, and a missing file errors cleanly. This is
+> honk's software-isolation answer (§15.6) — the sandbox, not a privilege
+> boundary, is what contains untrusted code in the single address space. Binary
+> 12 → ~14 MB.
 
 > **Steps 3 + 5 done (mid-2026)** — honk now makes **outbound TLS** connections.
 > Blank-importing `golang.org/x/crypto/x509roots/fallback` installs the Mozilla CA

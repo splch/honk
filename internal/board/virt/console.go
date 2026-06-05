@@ -157,7 +157,7 @@ func runCmd(w io.Writer, cmd string) {
 	switch {
 	case cmd == "":
 	case cmd == "help":
-		io.WriteString(w, "commands: help, ls, cat <file>, write <file> <text>, net, date, ntp, fetch <url>, rand\r\n")
+		io.WriteString(w, "commands: help, ls, cat <file>, write <file> <text>, run <file.wasm> [args], net, date, ntp, fetch <url>, rand\r\n")
 	case cmd == "net":
 		netCmd(w)
 	case cmd == "date":
@@ -207,6 +207,12 @@ func runCmd(w io.Writer, cmd string) {
 			return
 		}
 		fmt.Fprintf(w, "wrote %d bytes to %s\r\n", len(text)+1, name)
+	case strings.HasPrefix(cmd, "run "):
+		if FS == nil {
+			io.WriteString(w, "no disk\r\n")
+			return
+		}
+		runApp(w, cmd[len("run "):]) // sandboxed WebAssembly (wazero), DESIGN.md §15.5 step 8
 	default:
 		fmt.Fprintf(w, "unknown command: %s\r\n", cmd)
 	}

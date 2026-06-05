@@ -53,7 +53,8 @@ internal/mmio/       # volatile MMIO accessors (asm)
 internal/uart/       # NS16550A driver
 internal/plic/       # PLIC interrupt-controller driver
 internal/virtio/     # virtio-mmio v2 block + net + entropy drivers
-internal/board/virt/ # S-mode-under-OpenSBI board: runtime seam, trap, vm, console, disk, net
+internal/wasm/       # sandboxed WebAssembly runner (wazero + WASI, host-tested)
+internal/board/virt/ # S-mode-under-OpenSBI board: runtime seam, trap, vm, console, disk, net, wasm
 boot/virt/           # 20-byte load-base trampoline (trampoline.s)
 boot/sifive_u/       # Phase 0 trampoline BIOS (bios.s + bios.ld)
 Makefile             # toolchain + build + qemu + smoke + test (TARGET=virt|sifive_u)
@@ -78,7 +79,7 @@ in `wfi` between timer deadlines (no busy-poll), and runs under an
 **identity-mapped Sv39 page table enforcing W^X** (kernel text `R|X`, all else
 `R|W`-no-exec, A/D preset). It owns the **NS16550A UART** for interrupt-driven
 input driving a tiny **shell** (`help`, `ls`, `cat <file>`, `write <file>
-<text>`) at the `honk>` prompt: a keystroke raises a PLIC interrupt that wakes
+<text>`, `run <file.wasm>`) at the `honk>` prompt: a keystroke raises a PLIC interrupt that wakes
 the hart from `wfi`, `idle` drains it into a lock-free ring, and a console
 goroutine runs commands. `ls`/`cat`/`write` use a **writable FAT32 filesystem**
 (`diskfs/go-diskfs`) on a **virtio-blk** disk — honk formats a blank image on
@@ -96,8 +97,11 @@ plain `net/http` server on honk is reachable from your machine
 `crypto/rand`). It also makes **outbound TLS** connections: the shell's
 `fetch https://example.com` resolves DNS, dials over the stack, and verifies the
 certificate against embedded Mozilla roots; `ntp` syncs the clock, `date` shows
-it. Core honk is ~2.3 MB; the full networked build (gVisor + `net/http` + SSH +
-TLS roots) is ~12 MB.
+it. The shell's `run <file.wasm>` executes a **sandboxed WebAssembly app** on a
+pure-Go `wazero` interpreter — WASI stdout/stderr wired to your session and no
+other capability granted (the unikernel's software-isolation answer for
+untrusted code). Core honk is ~2.3 MB; the full build (gVisor + `net/http` + SSH
++ TLS roots + `wazero`) is ~14 MB.
 
 **Phase 0** — also runs on QEMU `sifive_u` (M-mode trampoline; the existing
 TamaGo RISC-V port), kept as a second board to keep the driver boundaries honest.
