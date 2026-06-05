@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	_ "unsafe"
 
+	"github.com/splch/honk/internal/sbi"
 	"github.com/splch/honk/internal/virtio"
 )
 
@@ -76,5 +77,12 @@ func initEntropy() {
 		puts("\n")
 		return
 	}
-	puts("honk/virt: WARNING no virtio-rng; crypto/rand is INSECURE (time-seeded)\n")
+	// Fail closed: with no hardware entropy, crypto/rand would key the SSH host
+	// key and all TLS material from the weak time-seeded fallback. On bare metal
+	// we cannot block until seeded the way Linux getrandom(2) does (the source is
+	// simply absent), so refuse to boot rather than serve predictable keys
+	// (DESIGN.md §15.4). The fallback above remains only for the runtime's early,
+	// pre-hwinit ChaCha8 hash seed, which is non-cryptographic.
+	puts("honk/virt: FATAL no virtio-rng entropy source; refusing to boot (would generate predictable SSH/TLS keys)\n")
+	sbi.Shutdown()
 }

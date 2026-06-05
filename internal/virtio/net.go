@@ -4,6 +4,7 @@ package virtio
 
 import (
 	"errors"
+	"sync"
 	"unsafe"
 
 	"github.com/splch/honk/internal/mmio"
@@ -57,7 +58,8 @@ type Net struct {
 	txBuf   []byte
 	txBufPA uint64
 
-	mac [6]byte
+	txMu sync.Mutex // serializes Send: gVisor's write-notify can fire from many goroutines
+	mac  [6]byte
 }
 
 // IsNet reports whether the mmio slot at base is a virtio network device.
@@ -75,6 +77,8 @@ func NewNet(base uintptr) (*Net, error) {
 	n := &Net{base: base, rx: newVQ(), tx: newVQ()}
 
 	mmio.W32(base+regStatus, 0)
+	for mmio.R32(base+regStatus) != 0 { // wait for reset to complete (VIRTIO 1.2 §3.1.1)
+	}
 	st := uint32(statusAck | statusDriver)
 	mmio.W32(base+regStatus, st)
 
@@ -94,8 +98,12 @@ func NewNet(base uintptr) (*Net, error) {
 		return nil, errors.New("virtio-net: FEATURES_OK rejected")
 	}
 
-	n.setupQueue(0, n.rx)
-	n.setupQueue(1, n.tx)
+	if err := n.setupQueue(0, n.rx); err != nil {
+		return nil, err
+	}
+	if err := n.setupQueue(1, n.tx); err != nil {
+		return nil, err
+	}
 
 	// RX: give every descriptor a device-writable buffer and publish them all.
 	for i := 0; i < queueSize; i++ {
@@ -124,9 +132,12 @@ func NewNet(base uintptr) (*Net, error) {
 // net.HardwareAddr to format or hand to the stack.
 func (n *Net) MAC() [6]byte { return n.mac }
 
-func (n *Net) setupQueue(idx uint32, q *vq) {
+func (n *Net) setupQueue(idx uint32, q *vq) error {
 	b := n.base
 	mmio.W32(b+regQueueSel, idx)
+	if mmio.R32(b+regQueueNumMax) < queueSize {
+		return errors.New("virtio-net: queue too small")
+	}
 	mmio.W32(b+regQueueNum, queueSize)
 	mmio.W32(b+regQueueDescLo, uint32(q.descPA))
 	mmio.W32(b+regQueueDescHi, uint32(q.descPA>>32))
@@ -134,12 +145,17 @@ func (n *Net) setupQueue(idx uint32, q *vq) {
 	mmio.W32(b+regQueueDrvHi, uint32(q.availPA>>32))
 	mmio.W32(b+regQueueDevLo, uint32(q.usedPA))
 	mmio.W32(b+regQueueDevHi, uint32(q.usedPA>>32))
+	q.avail.Flags = availNoInterrupt // polled: suppress used-buffer interrupts
+	mmio.Fence()
 	mmio.W32(b+regQueueReady, 1)
+	return nil
 }
 
 // Send transmits one Ethernet frame (a 12-byte zero virtio-net header is
 // prepended). It blocks until the device consumes the descriptor.
 func (n *Net) Send(frame []byte) {
+	n.txMu.Lock()
+	defer n.txMu.Unlock()
 	for i := 0; i < netHdrLen; i++ {
 		n.txBuf[i] = 0
 	}

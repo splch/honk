@@ -46,7 +46,16 @@ func SetWallClock(unixNanos int64) { cpu.SetTime(unixNanos) }
 // ticks away and wfi never wakes — which the old busy-poll RX masked by never
 // idling.
 func timerTicks(deadline int64) uint64 {
-	return uint64((float64(deadline) - float64(cpu.TimerOffset)) / cpu.TimerMultiplier)
+	// Subtract the wall-clock offset as int64 BEFORE converting to float: a 2026
+	// deadline (~1.8e18 ns) and TimerOffset both exceed float64's 2^53 exact
+	// range, so the old per-operand float conversion lost ~256 ns to rounding and
+	// catastrophic cancellation. delta is the (small) time until the deadline, so
+	// the float division is exact. A passed deadline clamps to 0 (arm immediately).
+	delta := deadline - cpu.TimerOffset
+	if delta < 0 {
+		delta = 0
+	}
+	return uint64(float64(delta) / cpu.TimerMultiplier)
 }
 
 func readTime() uint64 // time_riscv64.s

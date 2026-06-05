@@ -49,6 +49,11 @@ const (
 	descNext  = 1 // buffer continues in Next
 	descWrite = 2 // device writes this buffer
 
+	// availNoInterrupt is VIRTQ_AVAIL_F_NO_INTERRUPT: honk polls the used ring,
+	// so it asks the device not to raise (unrouted, never-ACKed) used-buffer
+	// interrupts (VIRTIO 1.2 §2.7.7).
+	availNoInterrupt = 1
+
 	// featVersion1 is VIRTIO_F_VERSION_1 (feature bit 32 = bit 0 of the second
 	// feature word). VIRTIO 1.x requires v2 (modern) MMIO drivers to negotiate
 	// it; a compliant device may refuse FEATURES_OK otherwise (spec §6.1).
@@ -155,8 +160,11 @@ func New(base uintptr) (*Block, error) {
 	b := &Block{base: base}
 	b.allocDMA()
 
-	// Reset, then ACKNOWLEDGE + DRIVER.
+	// Reset, then ACKNOWLEDGE + DRIVER. Wait for the reset to read back as 0
+	// before proceeding (VIRTIO 1.2 §3.1.1 / §4.2.3.2).
 	mmio.W32(base+regStatus, 0)
+	for mmio.R32(base+regStatus) != 0 {
+	}
 	st := uint32(statusAck | statusDriver)
 	mmio.W32(base+regStatus, st)
 
@@ -190,6 +198,8 @@ func New(base uintptr) (*Block, error) {
 	mmio.W32(base+regQueueDrvHi, uint32(b.availPA>>32))
 	mmio.W32(base+regQueueDevLo, uint32(b.usedPA))
 	mmio.W32(base+regQueueDevHi, uint32(b.usedPA>>32))
+	b.avail.Flags = availNoInterrupt // polled: suppress used-buffer interrupts
+	mmio.Fence()
 	mmio.W32(base+regQueueReady, 1)
 
 	mmio.W32(base+regStatus, st|statusDriverOK)

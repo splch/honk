@@ -3,8 +3,10 @@
 package virt
 
 import (
+	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/diskfs/go-diskfs/filesystem"
@@ -59,7 +61,16 @@ func initDisk() {
 	size := disk.Size()
 	f, err := fat32.Read(store, size, 0, virtio.SectorSize)
 	if err != nil {
-		// Unformatted (e.g. a blank image): lay down a fresh FAT32 and seed it.
+		if !blankDisk(disk) {
+			// A populated or corrupt filesystem, or a transient read error — NOT a
+			// blank image. Reformatting here would silently destroy data, so refuse
+			// and leave FS nil (the shell then reports "no disk").
+			puts("honk/virt: FAT32 mount failed and disk is not blank; refusing to reformat (")
+			puts(err.Error())
+			puts(")\n")
+			return
+		}
+		// Blank image: lay down a fresh FAT32 and seed it.
 		f, err = fat32.Create(store, size, 0, virtio.SectorSize, "HONK", false)
 		if err != nil {
 			puts("honk/virt: FAT32 format failed: ")
@@ -69,11 +80,39 @@ func initDisk() {
 		}
 		seedFS(f)
 		disk.Flush() // commit the format + motd to the backing image
-		puts("honk/virt: formatted FAT32 disk\n")
+		puts("honk/virt: formatted blank FAT32 disk\n")
 	}
 	FS = f
 	puts("honk/virt: ")
 	listDisk(uart0)
+}
+
+// blankDisk reports whether the device carries no filesystem. A boot sector
+// without the 0x55AA signature (offset 510-511) is treated as blank; anything
+// else — including an unreadable sector 0 — is treated as populated, so a
+// transient I/O error or an unrecognized-but-real filesystem is never silently
+// reformatted into oblivion.
+func blankDisk(d *virtio.Block) bool {
+	var sec [virtio.SectorSize]byte
+	if _, err := d.ReadAt(sec[:], 0); err != nil {
+		return false // cannot read sector 0: do not assume blank
+	}
+	return sec[510] != 0x55 || sec[511] != 0xAA
+}
+
+// validName rejects file names FAT/go-diskfs cannot represent safely. honk's
+// shell writes only to the disk root, so a name is a single path component:
+// reject empty, over-long, dot entries, path separators, and reserved chars.
+func validName(name string) bool {
+	if name == "" || len(name) > 255 || name == "." || name == ".." {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 || strings.ContainsRune(`/\:*?"<>|`, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // seedFS writes honk's initial files to a freshly formatted disk.
@@ -119,6 +158,9 @@ func ReadFile(name string) ([]byte, error) {
 // WriteFile creates or overwrites name at the root of the disk; the data
 // persists across reboots.
 func WriteFile(name string, data []byte) error {
+	if !validName(name) {
+		return errors.New("invalid file name")
+	}
 	fsMu.Lock()
 	defer fsMu.Unlock()
 	f, err := FS.OpenFile("/"+name, os.O_CREATE|os.O_RDWR|os.O_TRUNC)

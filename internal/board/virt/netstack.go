@@ -90,10 +90,17 @@ func initStack() {
 // is empty — which lets the scheduler reach idle and the hart enter wfi
 // (DESIGN.md §15.7). The interval starts tight, so active SSH/HTTP exchanges see
 // sub-millisecond latency and bursts never sleep, and doubles toward rxPollMax
-// as the link stays quiet, so an idle appliance wakes only ~100×/s.
+// as the link stays quiet, so an idle appliance wakes only ~250×/s.
+//
+// rxPollMax is bounded well under what would let a post-quiet burst overflow the
+// virtio RX ring: with queueSize (8) buffers, the link must exceed ~2000 frames/s
+// during a single max-length sleep to drop a frame, far above SLIRP's idle-link
+// rate. The first frame after quiet resets the delay to rxPollMin, so an active
+// transfer never sleeps. Eliminating the residual window needs interrupt-driven
+// RX (deferred, DESIGN.md §15.7).
 const (
 	rxPollMin = 250 * time.Microsecond
-	rxPollMax = 10 * time.Millisecond
+	rxPollMax = 4 * time.Millisecond
 )
 
 // rxLoop pumps inbound Ethernet frames from the NIC into the gVisor stack,
@@ -129,7 +136,23 @@ func serveHTTP() {
 		fmt.Fprintf(w, "uptime %s, %d goroutines, served over gVisor netstack.\n",
 			time.Since(booted).Round(time.Second), runtime.NumGoroutine())
 	})
-	http.ListenAndServe(":80", mux)
+	// Explicit timeouts and a header cap: the zero-value http.Server sets none, so
+	// a slow or idle client could pin a connection (Slowloris / resource
+	// exhaustion) — acute on honk's single hart (gosec G114).
+	srv := &http.Server{
+		Addr:              ":80",
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 16,
+	}
+	if err := srv.ListenAndServe(); err != nil {
+		puts("honk/virt: http server exited: ")
+		puts(err.Error())
+		puts("\n")
+	}
 }
 
 // fetchURL performs an outbound HTTP(S) GET and writes a short summary to w,

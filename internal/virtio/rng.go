@@ -36,6 +36,8 @@ func NewRNG(base uintptr) (*RNG, error) {
 	r := &RNG{base: base, q: newVQ()}
 
 	mmio.W32(base+regStatus, 0)
+	for mmio.R32(base+regStatus) != 0 { // wait for reset to complete (VIRTIO 1.2 §3.1.1)
+	}
 	st := uint32(statusAck | statusDriver)
 	mmio.W32(base+regStatus, st)
 	// Negotiate VIRTIO_F_VERSION_1 (word 1, required for v2 devices, §6.1); the
@@ -53,6 +55,9 @@ func NewRNG(base uintptr) (*RNG, error) {
 	}
 
 	mmio.W32(base+regQueueSel, 0)
+	if mmio.R32(base+regQueueNumMax) < queueSize {
+		return nil, errors.New("virtio-rng: queue too small")
+	}
 	mmio.W32(base+regQueueNum, queueSize)
 	mmio.W32(base+regQueueDescLo, uint32(r.q.descPA))
 	mmio.W32(base+regQueueDescHi, uint32(r.q.descPA>>32))
@@ -60,6 +65,8 @@ func NewRNG(base uintptr) (*RNG, error) {
 	mmio.W32(base+regQueueDrvHi, uint32(r.q.availPA>>32))
 	mmio.W32(base+regQueueDevLo, uint32(r.q.usedPA))
 	mmio.W32(base+regQueueDevHi, uint32(r.q.usedPA>>32))
+	r.q.avail.Flags = availNoInterrupt // polled: suppress used-buffer interrupts
+	mmio.Fence()
 	mmio.W32(base+regQueueReady, 1)
 	mmio.W32(base+regStatus, st|statusDriverOK)
 
@@ -92,8 +99,11 @@ func (r *RNG) Read(b []byte) (int, error) {
 		mmio.Fence()
 		got := int(r.q.used.Ring[r.q.lastUsed%queueSize].Len) // bytes the device wrote
 		r.q.lastUsed++
-		if got <= 0 || got > n {
-			got = n
+		if got > n {
+			got = n // a compliant device never writes past the buffer; clamp defensively
+		}
+		if got <= 0 {
+			continue // device returned no entropy; resubmit rather than fabricate it
 		}
 		copy(b, r.buf[:got])
 		b = b[got:]

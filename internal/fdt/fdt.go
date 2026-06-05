@@ -165,6 +165,14 @@ func (n *Node) propU32Default(name string, d uint32) uint32 {
 	return d
 }
 
+// enabled reports whether a node is usable. A missing "status" property means
+// "okay" per the Devicetree Specification; "disabled"/"fail"/"reserved" nodes
+// are skipped by the high-level queries below.
+func (n *Node) enabled() bool {
+	s, ok := n.PropString("status")
+	return !ok || s == "okay" || s == "ok"
+}
+
 // --- high-level queries ---
 
 // Model returns the root "model" string (the board name), or "".
@@ -178,6 +186,9 @@ func (t *Tree) Memory() (base, size uint64, ok bool) {
 	for _, c := range t.Root.Children {
 		dt, _ := c.PropString("device_type")
 		if dt != "memory" && !strings.HasPrefix(c.Name, "memory@") {
+			continue
+		}
+		if !c.enabled() {
 			continue
 		}
 		reg, ok2 := c.Prop("reg")
@@ -217,7 +228,7 @@ func (t *Tree) HartHasExtension(name string) bool {
 		return false
 	}
 	for _, c := range cpus.Children {
-		if dt, _ := c.PropString("device_type"); dt != "cpu" {
+		if dt, _ := c.PropString("device_type"); dt != "cpu" || !c.enabled() {
 			continue
 		}
 		if v, ok := c.Prop("riscv,isa-extensions"); ok {
@@ -246,7 +257,7 @@ func (t *Tree) HartCount() int {
 	}
 	n := 0
 	for _, c := range cpus.Children {
-		if dt, _ := c.PropString("device_type"); dt == "cpu" {
+		if dt, _ := c.PropString("device_type"); dt == "cpu" && c.enabled() {
 			n++
 		}
 	}

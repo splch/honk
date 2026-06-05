@@ -26,5 +26,6 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOV	runtime∕goos·RamStackOffset(SB), T2
 	ADD	T1, X2
 	SUB	T2, X2
+	AND	$-16, X2, X2	// force 16-byte sp alignment (ABI requires it at any call)
 
 	JMP	_rt0_tamago_start(SB)
