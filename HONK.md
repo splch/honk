@@ -284,6 +284,15 @@ is front-loaded; the OS logic on top of it is small because it is Go.
 1. **M0 Boot in HS + SMP + hello.** Boot as the OpenSBI S-mode payload; bring up
    all harts with a per-hart Go `M` (the `tamago-go` fork); banner; clean exit.
    The #1 risk is retired first.
+   - *Status:* **COMPLETE + verified.** Boots HS-mode under OpenSBI on QEMU virt;
+     **all harts run Go Ms** (`GOMAXPROCS=nharts`), the scheduler spreads
+     goroutines across every hart; clean SBI shutdown. Tested at `-smp 1/4/8`,
+     boot-hart-agnostic. Boots via a 24-byte trampoline (`tools/mkboot`) around
+     QEMU's fw_dynamic load-base entry; honk supplies its own `cpuinit` +
+     `runtime/goos` overlay in `board/virt`. **SMP needed NO `tamago-go` fork** -
+     the per-hart `M` bring-up uses the runtime's `goos.Task` hook (as tamago's
+     amd64 SMP does), so the #1 risk is retired and the fork stays at zero for
+     M0. See `docs/STATUS.md`.
 2. **M1 IRQ + console + shell.** Trap-vector hook routes IRQs to channels;
    `tamago-example/shell` over UART; clean panic with `scause`/`sepc`/`stval`.
 3. **M2 Process model.** `proc` table = goroutines + `context` + capabilities;
