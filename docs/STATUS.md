@@ -20,7 +20,9 @@ distribution (`tamago-go`) is auto-built on first use into the OS cache dir.
 |---|---|---|
 | **M0 boot + SMP + hello** | ✅ **complete** | Boots in HS-mode under OpenSBI on QEMU virt; **all harts run Go Ms** (`GOMAXPROCS=nharts`), scheduler spreads goroutines across every hart; clean SBI shutdown. Verified at `-smp 1/4/8`, boot-hart-agnostic. |
 | **M1 IRQ + console + shell** | ✅ **complete** | honk S-mode trap vector (proper `sret`); UART RX interrupt → PLIC → ring → channel; interactive shell over the UART; S-mode exceptions print `scause`/`sepc`/`stval` and halt. |
-| M2 process model | ⬜ next | `proc` table = goroutine + context + caps; `recover()` domains. |
+| **M2 process model** | ✅ **complete** | `proc` table = goroutine + `context` (cancel = kill) + capabilities; `run`/`ps`/`kill`/`crash`/`reap`/`stress` shell commands; `recover()` fault domains (a panicking process is reaped, kernel + siblings survive); race-tested (`go test -race ./kernel/proc`) and stressed under `-smp 4`. |
+
+**Phase A (foundation) is complete.** Next is Phase B (storage): M3 PCIe + NVMe.
 
 ## What boots today (M0+M1)
 
@@ -76,6 +78,29 @@ Memory map (sized for `-m 512M`, hardcoded until DTB parsing lands):
 `RamStart=0x80400000`, `RamSize=0x1DA00000` (ends below the DTB at ~0x9fe00000
 so the runtime arena/boot stack never clobber it).
 
+## Process model (M2) - how it works
+
+`kernel/proc` maps the OS "process" onto Go primitives (HONK.md §1) and is
+pure Go, so it is race-tested on the host with `go test -race`:
+
+- **Process = goroutine + `context`.** `Table.Spawn(name, caps, fn)` allocates a
+  PID, makes a cancelable context, records the `*Proc` (PID, name, caps,
+  start time, state), and runs `fn(ctx)` in a goroutine. `Kill(pid)` cancels
+  the context (cancel = kill); cooperative `fn`s return on `ctx.Done()`.
+- **`recover()` fault domain.** The per-process goroutine defers a `recover()`,
+  so a panic is contained: the process is reaped as `panicked` and the kernel
+  and every sibling keep running (the `crash` command demonstrates it).
+- **Capabilities.** Each process carries a `Caps` set (`console`/`net`/`block`/
+  `proc`); `proc.Self(ctx).Can(cap)` is the query the kernel gates on. `ps`
+  shows each process's grant. (Real authority is the interface values handed to
+  a process; `Caps` is the bookkeeping.)
+
+The shell exposes `run`/`ps`/`kill`/`crash`/`reap`/`stress`. `stress N` spawns
+N short-lived processes that run across all harts, exercising the table under
+SMP; `go test -race ./kernel/proc` is the host-side race gate (both run by
+`tools/smoke-test.sh`). Uncooperative (tight-loop, unkillable) code is a job
+for the WASM/VM tiers, not a trusted goroutine.
+
 ## Console + traps (M1) - how it works
 
 TamaGo's riscv64 trap handler is M-mode and never does a real trap return, so
@@ -130,10 +155,9 @@ whatever OpenSBI selects; `InitSMP` skips it and starts all the others.
 `maxHarts` (currently 8) bounds the hand-off tables; raise it and re-test for
 larger `-smp` values.
 
-## Next: M2
+## Next: M3 (Phase B - storage)
 
-Process model: a `proc` table of goroutines + `context.Context` (cancel = kill)
-+ capability sets, with `run`/`ps`/`kill` shell commands and `recover()` fault
-domains so a panicking task is reaped while the kernel and siblings survive.
-Race-tested under `-smp 4`. Cheap groundwork still pending: DTB parsing (hart
-count, RAM size, MMIO bases) to replace the hardcoded memory map and probing.
+PCIe ECAM enumeration and an NVMe driver (with a virtio-blk fallback)
+implementing a `BlockDevice` interface. Cheap groundwork still pending and
+shared with later milestones: DTB parsing (hart count, RAM size, MMIO bases)
+to replace the hardcoded memory map and the SBI-HSM hart probing.

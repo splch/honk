@@ -307,6 +307,13 @@ is front-loaded; the OS logic on top of it is small because it is Go.
 3. **M2 Process model.** `proc` table = goroutines + `context` + capabilities;
    `run`/`ps`/`kill`; `recover()` fault domains (a panicking app is reaped, kernel
    and siblings live); race-tested under `-smp 4`.
+   - *Status:* **COMPLETE + verified.** `kernel/proc` (pure Go, host
+     race-tested) maps process = goroutine + `context.Context` (cancel = kill) +
+     `Caps`. Shell `run`/`ps`/`kill`/`crash`/`reap`/`stress`; `recover()` fault
+     domains contain panics (the kernel and siblings survive); capabilities are
+     shown by `ps` and queried via `proc.Self(ctx).Can(...)`. Verified with
+     `go test -race ./kernel/proc` and a live `stress` across 4 harts.
+     **Phase A complete.** See `docs/STATUS.md`.
 
 **Phase B - storage**
 4. **M3 PCIe + NVMe** (virtio-blk fallback) implementing `BlockDevice`.

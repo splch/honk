@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"honk/board/virt"
+	"honk/kernel/proc"
 )
 
 const banner = `
@@ -48,6 +50,10 @@ func main() {
 	} else {
 		fmt.Printf("honk: SMP single-hart - goroutines ran on %v\n", harts)
 	}
+
+	// PID 1: the init process (M2). It holds the proc capability and lives
+	// until shutdown, so `ps` always shows a root process.
+	procs.Spawn("init", proc.Caps{proc.CapProc: true}, func(ctx context.Context) { <-ctx.Done() })
 
 	// Hand off to the interactive shell over the UART (M1). It returns only on
 	// EOF; commands `exit`/`fault` power the machine off via SBI.
