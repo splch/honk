@@ -1,9 +1,0 @@
-# build artifacts
-/build/
-
-# toolchain, if ever built inside the tree (default lives in ~/.cache)
-/.tamago/
-/tamago-go/
-
-# editor / OS cruft
-.DS_Store
