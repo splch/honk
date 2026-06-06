@@ -13,7 +13,9 @@ honk boots as an **HS-mode payload under OpenSBI** on the QEMU `virt` machine.
 
 ```sh
 make run              # build + boot under QEMU (Ctrl-A x to quit)
-tools/smoke-test.sh   # build + boot + assert M0 output
+make test             # host race tests of every pure-Go package
+make phase-a          # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
+make smoke            # build + boot + assert M0-M5 output (CI gate)
 ```
 
 Needs a host Go toolchain and `qemu-system-riscv64`. The TamaGo Go distribution
@@ -24,12 +26,13 @@ is downloaded and built automatically on first use.
 ```
 kernel/        the HS-mode Go program (the OS): boot, SMP demo, shell
 kernel/proc/   process model: goroutine + context + capabilities (host-tested)
+board/virt/ring/  SPSC byte ring for the IRQ->channel console path (host-tested)
 block/         block-device interface + in-memory device (host-tested)
 kernel/kv/     crash-safe log-structured key/value store, disk-resident (host-tested)
 kernel/vfs/    io/fs.FS over the kv store + overlay on the verified core (host-tested)
 kernel/image/  signed, Merkle-tree'd immutable core image; A/B + anti-rollback (host-tested)
 board/virt/    QEMU virt board: startup, SMP, traps, PLIC, UART, PCIe/NVMe, virtio-blk, SBI
-tools/         build.sh, vet.sh, run-qemu.sh, smoke-test.sh, mkboot + mkimage
+tools/         build.sh, vet.sh, run-qemu.sh, smoke-test.sh, phase-a-test.sh, mkboot + mkimage
 HONK.md        full design and roadmap
 docs/STATUS.md what works today and what's next
 GO.md RV64.md OS.md   language / hardware / domain references

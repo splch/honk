@@ -2,7 +2,7 @@
 
 CORE_VERSION ?= 1
 
-.PHONY: all kernel run clean fmt vet test smoke coreimg
+.PHONY: all kernel run clean fmt vet test smoke phase-a coreimg
 
 all: kernel
 
@@ -27,14 +27,20 @@ fmt:
 vet: coreimg
 	tools/vet.sh
 
-# Host race tests for the portable, pure-Go packages (process model, storage,
-# image verity).
+# Host race tests for the portable, pure-Go packages (process model, console
+# input ring, storage, image verity).
 test:
-	go test -race -count=1 ./kernel/proc/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./block/
+	go test -race -count=1 ./kernel/proc/ ./board/virt/ring/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./block/
 
 # Build + boot under QEMU and assert expected output (CI gate).
 smoke:
 	tools/smoke-test.sh
+
+# Phase A (M0/M1/M2) acceptance: host race tests + a focused QEMU boot matrix
+# (SMP 1/4/8, RAM 256M-2G, console + line editing, the fatal trap path, and the
+# live process model). No storage attached - Phase A stands on the core alone.
+phase-a:
+	tools/phase-a-test.sh
 
 clean:
 	rm -f honk.elf boot.bin kernel/core.img

@@ -4,7 +4,7 @@
 
 package virt
 
-import "sync/atomic"
+import "honk/board/virt/ring"
 
 // trapStacks are per-hart interrupt stacks. trapEntry switches to its hart's
 // stack via sscratch (set in cpuinit/secondaryEntry) so the handler never runs
@@ -55,7 +55,7 @@ func handleIRQ() {
 	}
 	if irq == uartIRQ {
 		for uartRxReady() {
-			ringPush(uartReadByte())
+			consoleRing.Push(uartReadByte())
 		}
 	}
 	plicComplete(ctx, irq)
@@ -97,32 +97,8 @@ func putHex(v uint64) {
 	}
 }
 
-// Input ring: single-producer (the boot hart's trap handler) / single-consumer
-// (consoleReader). uint32 indices wrap; the difference is the live count.
-const ringSize = 1024 // power of two
-
-var (
-	ringBuf  [ringSize]byte
-	ringHead uint32 // next index to read
-	ringTail uint32 // next index to write
-)
-
-//go:nosplit
-func ringPush(b byte) {
-	t := atomic.LoadUint32(&ringTail)
-	if t-atomic.LoadUint32(&ringHead) >= ringSize {
-		return // full: drop
-	}
-	ringBuf[t&(ringSize-1)] = b
-	atomic.StoreUint32(&ringTail, t+1)
-}
-
-func ringPop() (byte, bool) {
-	h := atomic.LoadUint32(&ringHead)
-	if h == atomic.LoadUint32(&ringTail) {
-		return 0, false
-	}
-	b := ringBuf[h&(ringSize-1)]
-	atomic.StoreUint32(&ringHead, h+1)
-	return b, true
-}
+// consoleRing is the UART input ring: single-producer (the boot hart's trap
+// handler, via handleIRQ -> Push) / single-consumer (consoleReader, via Pop).
+// The SPSC correctness lives in the host-tested ring package; this is the one
+// instance honk's console uses.
+var consoleRing = ring.New(1024)

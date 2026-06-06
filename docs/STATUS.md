@@ -7,7 +7,9 @@ Living record of what is implemented and verified, and what is next. See
 
 ```sh
 make run        # build + boot under QEMU virt (Ctrl-A x to quit)
-tools/smoke-test.sh   # build + boot + assert expected output (CI gate)
+make test       # host race tests of every pure-Go package
+make smoke      # build + boot + assert M0-M5 output (CI gate)
+make phase-a    # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
 make vet        # go vet under the tamago toolchain
 ```
 
@@ -21,6 +23,35 @@ distribution (`tamago-go`) is auto-built on first use into the OS cache dir.
 | **M0 boot + SMP + hello** | ✅ **complete** | Boots in HS-mode under OpenSBI on QEMU virt; **all harts run Go Ms** (`GOMAXPROCS=nharts`), scheduler spreads goroutines across every hart; clean SBI shutdown. Verified at `-smp 1/4/8`, boot-hart-agnostic. |
 | **M1 IRQ + console + shell** | ✅ **complete** | honk S-mode trap vector (proper `sret`); UART RX interrupt → PLIC → ring → channel; interactive shell over the UART; S-mode exceptions print `scause`/`sepc`/`stval` and halt. |
 | **M2 process model** | ✅ **complete** | `proc` table = goroutine + `context` (cancel = kill) + capabilities; `run`/`ps`/`kill`/`crash`/`reap`/`stress` shell commands; `recover()` fault domains (a panicking process is reaped, kernel + siblings survive); race-tested (`go test -race ./kernel/proc`) and stressed under `-smp 4`. |
+
+### Phase A acceptance test
+
+Phase A is the foundation the whole roadmap stands on, so it has a dedicated
+acceptance gate (`make phase-a`, `tools/phase-a-test.sh`) on top of the broad
+M0-M5 smoke test. The split is by where the authority for correctness lives:
+
+- **Pure-Go logic → host `-race` unit tests.** The M2 process state machine
+  (`kernel/proc`, 23 tests) and the M1 SPSC console-input ring
+  (`board/virt/ring`, extracted from the trap path so it is host-testable, 5
+  tests incl. an adversarial single-producer/single-consumer race) are exercised
+  under `go test -race`, which is authoritative for the concurrency correctness
+  the bare-metal trap path can never reach reliably (wraparound, drop-on-full
+  backpressure, the killed-vs-finished and panic-overrides-killed state guards).
+- **Hardware-contact behavior → QEMU integration.** SMP bring-up across
+  `-smp 1/4/8` (every hart becomes a Go M, `GOMAXPROCS=nharts`,
+  boot-hart-agnostic), `RamSize` derivation from the DTB across `-m 256M..2G`,
+  the UART-RX-IRQ→PLIC→ring→channel→shell input path with line editing, the
+  fatal trap path (`fault` → EBREAK → `scause=3`/`sepc`/`stval` → SBI poweroff),
+  and the live process model on 4 harts (`run`/`ps`/`kill`/`crash`/`reap`/
+  `stress`, with a post-`crash` command proving the `recover()` fault domain
+  held). Phase A attaches **no** block device - it boots on the embedded,
+  verified core alone - so the foundation is tested in isolation from M3+.
+
+  (Re-deriving the PLIC context math or the memory-size formula in a host test
+  would only check the constants against themselves; the hardware is the
+  authority, so those are proven in QEMU - the console working at all proves
+  PLIC routing; booting and running the GC across RAM sizes proves the arena
+  sizing; goroutines spreading across N/N harts proves the SMP hand-off.)
 | **M3 block device** | ✅ **complete** | `block.Device` interface with two backends: **NVMe-over-PCIe** (PCIe ECAM enumeration + BAR assignment, controller bring-up, admin+I/O queues, identify, PRP read/write - primary) and **virtio-blk** (virtio-mmio v2, split virtqueue - fallback). Both implement a `Flush` cache barrier. `blk` shell self-test; both verified for detection, read/write round-trip, and on-disk persistence; smoke test gates both. |
 | **M4 KV store + VFS** | ✅ **complete** | Crash-safe log-structured KV (`kernel/kv`) over `block.Device` - single-appender group commit, lock-free COW snapshot reads, double-buffered superblock, atomic-checkpoint compaction, replay-to-sequence-floor (safe region reuse). **Durable by default** (each batch flushes before ack; compaction flushes the region before the superblock switch, so the checkpoint is host-crash-safe). **Hybrid value store:** small values inline in memory, larger ones disk-resident (index holds a verified pointer), so the store is not RAM-bounded. Exposed as `io/fs.FS` (`kernel/vfs`) overlaid on the embedded core; `ls`/`cat`/`cp`/`put`/`rm` shell. Host race-tested (torn-tail, region-reuse leftovers, compaction, disk-resident, a 600-op crash-consistency property test, `fstest.TestFS` incl. the overlay), reboot persistence verified in QEMU. |
 | **M5 immutable core** | ✅ **complete** | Signed, Merkle-tree'd core image (`kernel/image`): a header with the SHA-256 Merkle root, an anti-rollback security version, and a file-table hash, signed with Ed25519. Boot `Verify`s the signature against an abstract **anchor** (QEMU = embedded dev key; silicon = OTP-fused key + monotonic counter behind the same interface), the version floor, the table hash, the Merkle root, and per-file bounds - failing closed. The device is partitioned (`block.Slice`) into **A/B image slots + the kv region**; boot `Select`s the highest valid version and falls back across the rest, with the embedded factory image as the guaranteed-good last candidate. The verified core is served read-only (`vfs.FilesFS`) under the writable kv overlay. **Stateless reset** (`kv.Reset`, shell `reset --confirm`) clears the writable layer crash-safely. `tools/mkimage` builds/signs images. Host race-tested (build/verify, tamper, anti-rollback, A/B + fallback, slot I/O); QEMU-verified (verification, A/B select + fallback, reset). |

@@ -44,7 +44,7 @@ func InitConsole() {
 	// asserted (level-triggered) and is delivered once routing is enabled.
 	uartInit()
 	for uartRxReady() {
-		ringPush(uartReadByte())
+		consoleRing.Push(uartReadByte())
 	}
 	plicEnableSource(ctx, uartIRQ)
 
@@ -56,7 +56,7 @@ func InitConsole() {
 // the "idle forever" shutdown path while honk waits for input.
 func consoleReader() {
 	for {
-		if b, ok := ringPop(); ok {
+		if b, ok := consoleRing.Pop(); ok {
 			consoleIn <- b
 			continue
 		}

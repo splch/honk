@@ -10,9 +10,10 @@ cd "$(dirname "$0")/.."
 WATCHDOG="${WATCHDOG:-45}"
 SMP="${SMP:-4}"
 
-# Host race tests of the pure-Go stack (M2 proc, M4 kv + vfs, M5 image verity).
-echo "== go test -race ./kernel/... ./block =="
-go test -race -count=1 ./kernel/proc/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./block/ ||
+# Host race tests of the pure-Go stack (M1 console ring, M2 proc, M4 kv + vfs,
+# M5 image verity).
+echo "== go test -race ./kernel/... ./board/virt/ring ./block =="
+go test -race -count=1 ./kernel/proc/ ./board/virt/ring/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./block/ ||
 	{ echo "SMOKE FAIL: host race tests" >&2; exit 1; }
 
 tools/build.sh >/dev/null
