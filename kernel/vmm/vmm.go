@@ -93,26 +93,11 @@ func WriteGStage(root, l1 []byte, rootPA, l1PA, guestPA, guestBase uint64) {
 // runs one guest at a time).
 func Hgatp(rootPA uint64) uint64 { return HgatpSv39x4<<60 | rootPA>>12 }
 
-// RISC-V opcodes the guest payload uses (RV64I). The guest is deliberately
-// trivial straight-line code so the milestone proves the H-extension mechanism
-// against a payload honk fully controls (HONK.md M11).
-const (
-	regA0 = 10 // a0 = SBI argument
-	regA7 = 17 // a7 = SBI extension id
-
-	opEcall = 0x00000073 // ecall (trap to the SEE; from VS-mode -> HS, cause 10)
-	opJ0    = 0x0000006f // jal x0, 0 (an infinite self-loop: "j .")
-
-	// Legacy SBI extension ids the guest invokes and honk's VMM emulates.
-	SBIConsolePutchar = 1 // a7=1: console_putchar(a0)
-	SBIShutdown       = 8 // a7=8: shutdown - the guest's "done" signal
-)
-
-// addi encodes `addi rd, rs1, imm` (the I-type used to load small immediates,
-// i.e. `li rd, imm` for imm in [-2048, 2047]). funct3=0, opcode=0x13.
-func addi(rd, rs1, imm int) uint32 {
-	return uint32(imm&0xfff)<<20 | uint32(rs1)<<15 | uint32(rd)<<7 | 0x13
-}
+// The guest payloads are hand-rolled VS-mode programs honk fully controls, so
+// each milestone proves the H-extension mechanism against code it can decode
+// and host-test (the instruction encoders live in encode.go, the SBI numbers in
+// sbi.go). M11's DemoGuest is straight-line; M12's TimerGuest adds a trap
+// handler and a timer loop.
 
 // DemoGuest builds the M11 guest: a VS-mode payload that prints msg one
 // character at a time via the legacy SBI console_putchar call, then asks the
@@ -138,6 +123,97 @@ func DemoGuest(msg string) []byte {
 		opJ0,                        // j .   (unreached; guards a missed stop)
 	)
 
+	return assemble(ins)
+}
+
+// TimerGuest builds the M12 guest: a VS-mode payload that proves the timer +
+// interrupt-injection path end to end. It probes the SBI Base extension for
+// TIME (so the run ticks only if honk's Base/probe emulation works), installs
+// its own VS trap vector, enables VS supervisor-timer interrupts, and arms an
+// SBI timer. Each time honk injects a VS-timer interrupt, the guest's handler
+// prints tick, reprograms the next timer, and returns; after ticks ticks it
+// shuts down via SBI. tick must be a printable ASCII byte.
+//
+// The only data-dependent value is the handler's absolute address; the
+// jump/branch offsets are computed from the emitted instruction indices, so
+// editing the body cannot silently desynchronize them.
+func TimerGuest(tick byte, ticks int) []byte {
+	const (
+		stie  = 1 << 5 // sie.STIE: VS supervisor-timer interrupt enable
+		sie   = 1 << 1 // sstatus.SIE: VS global interrupt enable
+		delta = 50000  // timer interval in time-CSR ticks (~5 ms at 10 MHz)
+	)
+
+	var ins []uint32
+	emit := func(words ...uint32) { ins = append(ins, words...) }
+
+	// arm sets a7/a6/a0 and ecalls SBI TIME set_timer(rdtime + delta). Used to
+	// start the first timer and to reprogram from inside the handler.
+	arm := func() {
+		emit(rdtime(regA0))
+		emit(loadImm32(regT1, delta)...)
+		emit(add(regA0, regA0, regT1)) // a0 = now + delta
+		emit(loadImm32(regA7, SBIExtTime)...)
+		emit(addi(regA6, regZero, SBITimeSetTimer))
+		emit(opEcall)
+	}
+
+	// prologue: install the handler, enable interrupts, init the tick counter.
+	handlerLoad := len(ins)
+	emit(loadAddr(regT0, 0)...)       // li t0, &handler  (offset patched below)
+	emit(csrw(csrStvec, regT0))       // vstvec = handler
+	emit(addi(regS0, regZero, ticks)) // s0 = remaining ticks (survives traps)
+	emit(addi(regT0, regZero, stie))
+	emit(csrs(csrSie, regT0)) // sie.STIE = 1
+	emit(addi(regT0, regZero, sie))
+	emit(csrs(csrSstatus, regT0)) // sstatus.SIE = 1
+
+	// probe SBI Base for TIME; if unsupported, skip straight to shutdown.
+	emit(addi(regA7, regZero, SBIExtBase))
+	emit(addi(regA6, regZero, SBIBaseProbeExtension))
+	emit(loadImm32(regA0, SBIExtTime)...)
+	emit(opEcall)
+	probeBranch := len(ins)
+	emit(0) // beq a1, x0, shutdown  (patched)
+
+	arm() // start the first timer
+
+	// wait loop: idle until honk injects the timer interrupt.
+	waitIdx := len(ins)
+	emit(opWFI)
+	waitJump := len(ins)
+	emit(0) // jal x0, wait  (patched)
+
+	// handler: print one tick, count down, reprogram or shut down.
+	handlerIdx := len(ins)
+	emit(addi(regA7, regZero, SBIConsolePutchar))
+	emit(addi(regA0, regZero, int(tick)))
+	emit(opEcall)
+	emit(addi(regS0, regS0, -1))
+	handlerBranch := len(ins)
+	emit(0)      // beq s0, x0, shutdown  (patched)
+	arm()        // reprogram the next tick (the set_timer also clears the injection)
+	emit(opSret) // return to the wait loop
+
+	// shutdown: end the run.
+	shutdownIdx := len(ins)
+	emit(addi(regA7, regZero, SBIShutdown))
+	emit(opEcall)
+	emit(opJ0) // guard against a missed stop
+
+	// Patch the handler address (third word of loadAddr) and the relative
+	// jump/branch offsets, now that every label index is known.
+	ins[handlerLoad+2] = addi(regT0, regT0, handlerIdx*4)
+	ins[probeBranch] = beq(regA1, regZero, (shutdownIdx-probeBranch)*4)
+	ins[waitJump] = jal(regZero, (waitIdx-waitJump)*4)
+	ins[handlerBranch] = beq(regS0, regZero, (shutdownIdx-handlerBranch)*4)
+
+	return assemble(ins)
+}
+
+// assemble packs a RV64 instruction stream into little-endian machine code to
+// copy into guest memory.
+func assemble(ins []uint32) []byte {
 	out := make([]byte, 4*len(ins))
 	for i, in := range ins {
 		binary.LittleEndian.PutUint32(out[4*i:], in)

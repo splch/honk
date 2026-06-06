@@ -121,16 +121,23 @@ storage = virtio-blk
 blk: read/write self-test OK
 EOF
 
-# Run V: hypervisor (M11). Launch a VS-mode guest under the H-extension (the
-# boot cpu is rv64,h=true). The guest prints a line via emulated SBI
+# Run V: hypervisor (M11 + M12). M11: launch a VS-mode guest under the
+# H-extension (the boot cpu is rv64,h=true); it prints a line via emulated SBI
 # console_putchar and halts via SBI shutdown - proving H-ext enable, hgatp
-# Sv39x4 G-stage paging, the HS<->VS world switch, and trap-and-emulate end to
-# end. No devices needed; the guest runs from a G-stage-mapped RAM buffer.
-boot $'\nvm\nexit\n' "$VV"
-want "$VV" "vmm/M11" <<'EOF'
+# Sv39x4 G-stage paging, the HS<->VS world switch, and trap-and-emulate. M12:
+# `vm timer` runs a guest that probes SBI Base for TIME, installs its own VS
+# trap vector, arms an SBI timer, and on each VS-timer interrupt honk injects
+# (hvip.VSTIP) prints a '*' and reprograms it, then shuts down after 5 ticks -
+# proving SBI Base/TIME emulation, VS-timer interrupt injection, and timer-
+# driven preemption. The '*****' appears only if the whole chain works. No
+# devices needed; the guest runs from a G-stage-mapped RAM buffer.
+boot $'\nvm\nvm timer\nexit\n' "$VV"
+want "$VV" "vmm/M11+M12" <<'EOF'
 launching a VS-mode guest
 hello from a guest VM
 guest halted (SBI shutdown)
+launching a timer guest
+guest ticks: *****
 EOF
 
 # Run R: stateless reset clears the writable layer; the immutable core remains.

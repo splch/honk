@@ -214,3 +214,51 @@ TEXT ·readHtval(SB),NOSPLIT,$0-8
 	CSRRS	ZERO, HTVAL, T0
 	MOV	T0, ret+0(FP)
 	RET
+
+// hvip: hypervisor virtual-interrupt pending. honk sets bit 6 (VSTIP) to inject
+// a supervisor-timer interrupt into the guest (M12).
+TEXT ·writeHvip(SB),NOSPLIT,$0-8
+	MOV	v+0(FP), T0
+	CSRRW	T0, HVIP, ZERO
+	RET
+
+TEXT ·readHvip(SB),NOSPLIT,$0-8
+	CSRRS	ZERO, HVIP, T0
+	MOV	T0, ret+0(FP)
+	RET
+
+// hideleg: delegate VS-level interrupts to VS-mode. honk sets bit 6 so the
+// injected VS timer is delivered to the guest, not trapped to HS.
+TEXT ·writeHideleg(SB),NOSPLIT,$0-8
+	MOV	v+0(FP), T0
+	CSRRW	T0, HIDELEG, ZERO
+	RET
+
+TEXT ·readHideleg(SB),NOSPLIT,$0-8
+	CSRRS	ZERO, HIDELEG, T0
+	MOV	T0, ret+0(FP)
+	RET
+
+// hcounteren: let VS-mode read the time CSR (bit 1, TM), which the guest needs
+// to compute its absolute SBI timer deadline.
+TEXT ·writeHcounteren(SB),NOSPLIT,$0-8
+	MOV	v+0(FP), T0
+	CSRRW	T0, HCOUNTEREN, ZERO
+	RET
+
+TEXT ·readHcounteren(SB),NOSPLIT,$0-8
+	CSRRS	ZERO, HCOUNTEREN, T0
+	MOV	T0, ret+0(FP)
+	RET
+
+// sie: honk's own S-mode interrupt enables. The VMM enables STIE (the HS timer
+// that bounds and times the guest) and masks SEIE during the run.
+TEXT ·writeSie(SB),NOSPLIT,$0-8
+	MOV	v+0(FP), T0
+	CSRRW	T0, SIE, ZERO
+	RET
+
+TEXT ·readSie(SB),NOSPLIT,$0-8
+	CSRRS	ZERO, SIE, T0
+	MOV	T0, ret+0(FP)
+	RET

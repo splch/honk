@@ -482,6 +482,31 @@ is front-loaded; the OS logic on top of it is small because it is Go.
       the only paging in honk.** See `docs/STATUS.md`.
 13. **M12 Small guest.** rCore or RT-Thread: exercise SBI, a timer, and a simple
     driver path. vCPU = goroutine.
+    - *Status:* **COMPLETE + verified** (the M12 *mechanisms*, against a payload
+      honk controls - the M11 discipline; a real third-party guest image rides
+      on M13's device backends). honk now delivers a guest a **timer** and is
+      **preemptible**: the guest arms an SBI `set_timer`; honk records the
+      deadline and arms its *own* HS timer; when that fires *during* the guest
+      it **injects a VS-timer interrupt** (`hvip.VSTIP`, delegated to VS via
+      `hideleg`), which the guest takes in its own VS trap vector (it also sets
+      `sie.STIE`/`sstatus.SIE`, and honk sets `hcounteren.TM` so the guest can
+      read `time`). honk keeps its HS timer armed for at most a quantum, so it
+      regains the hart from a running guest periodically (a wall-clock budget
+      bounds the whole run) - timer-driven preemption, the safety net against a
+      runaway guest. The SBI surface grew to **Base `probe_extension` + TIME
+      `set_timer`** alongside M11's legacy console + shutdown (numbers in
+      `kernel/vmm/sbi.go`, effects in `board/virt`). **vCPU = goroutine:** the
+      whole world-switch + trap-and-emulate loop is one `//go:nosplit`,
+      allocation-free, non-yielding region - on tamago (no async preemption) it
+      is never descheduled, so the vCPU goroutine cannot migrate off its hart
+      (keeping the hart-local CSRs valid) and never trips the fixed-M-per-hart
+      SMP model. (An initial `runtime.LockOSThread` design deadlocked exactly
+      that way: a deschedule of the pinned vCPU under GC made the runtime try to
+      start an M beyond the parked harts.) `kernel/vmm` gained a tiny RV64
+      assembler (`encode.go`) and `TimerGuest`, host race-tested by decoding the
+      generated program; the run is QEMU-verified (`vm timer` → `*****` from five
+      injected timer interrupts, then SBI shutdown) and smoke-gated. Shell `vm
+      timer`. See `docs/STATUS.md`.
 14. **M13 Linux + virtio-fs.** Full device tree, PLIC/AIA emulation,
     virtio-fs/blk/net backends; boot a Linux guest that transparently mounts
     honk's files over virtio-fs - the escape hatch for the long tail of real

@@ -67,8 +67,9 @@ M0-M5 smoke test. The split is by where the authority for correctness lives:
 | **M10 GUI + input** | ✅ **complete** | **virtio-input + a minimal `image/draw` toolkit.** honk's virtio-input driver (`board/virt/virtioinput.go`, polled like the other virtio devices - a queue-backed device loses nothing without an IRQ) surfaces raw evdev events from QEMU's virtio-keyboard + virtio-tablet. `kernel/gui` is a pure-Go retained-mode toolkit (a `UI` routing pointer/key events to widgets, `Button` + `TextField`, text via `x/image/font/basicfont`) rendering into any `draw.Image`; `kernel/ui.go` translates evdev -> `gui.Event` (keycode->rune, tablet axes->pixels) and pumps them into an interactive demo on the M9 framebuffer. Host race-tested (event dispatch, focus routing, **and rendered pixels** in an in-memory image). QEMU-verified end to end and headless: the smoke test injects a click + typed text over QMP `input-send-event`, asserts honk logged them (serial) and that the click's green reached the host framebuffer (screendump, `tools/uitest.py`). Shell `ui`. |
 
 | **M11 H-ext bring-up** | ✅ **complete** | **The first pure-Go RISC-V hypervisor.** honk hosts a VS-mode guest under the H-extension: it builds an Sv39x4 G-stage map (`hgatp`, guest-physical → supervisor-physical), world-switches HS↔VS via a dedicated trap vector + `sscratch` trampoline (`board/virt/vmm_riscv64.s`), and trap-and-emulates the guest's SBI calls. A tiny hand-rolled VS-mode payload (`kernel/vmm.DemoGuest`) prints a line via emulated SBI `console_putchar` and halts via SBI shutdown - proving H-ext enable, two-stage paging, and trap-and-emulate against code honk fully controls. The guest/page-table encoders (`kernel/vmm`) are host race-tested; the run is QEMU-verified end to end and smoke-gated. Shell `vm`. **The only paging in honk.** |
+| **M12 timer + preemptible vCPU** | ✅ **complete** | **A timer, interrupt injection, and a preemptible vCPU** - the mechanisms a real guest needs, proven against a hand-rolled guest (`kernel/vmm.TimerGuest`). honk emulates a broader SBI surface (Base `probe_extension` + TIME `set_timer`, alongside M11's legacy console + shutdown) and delivers the guest's timer by **injecting a VS-timer interrupt** (`hvip.VSTIP`, delegated to VS via `hideleg`) when the deadline passes; the guest installs its own VS trap vector, takes the interrupt, prints a tick, and reprograms it. honk runs its own HS timer so it regains the hart from a running guest each quantum (and on a wall-clock budget) - timer-driven **preemption**. The whole world-switch + trap-and-emulate loop is one `//go:nosplit`, allocation-free, non-yielding region: on tamago (no async preemption) it is never descheduled, so the vCPU goroutine cannot migrate off its hart and never trips honk's fixed-M-per-hart SMP model. Guest/timer encoders host race-tested (`kernel/vmm`); QEMU-verified and smoke-gated (`vm timer` → `*****` then SBI shutdown). Shell `vm timer`. |
 
-**Phase A + B + C complete (the everyday networked OS): M6 networking + M7 WASM/WASI + M8 host files. Phase D complete: M9 framebuffer + M10 GUI/input. Phase E begun: M11 H-extension bring-up.** Next: M12 - a small real guest (rCore/RT-Thread): exercise SBI, a timer, and a driver path.
+**Phase A + B + C complete (the everyday networked OS): M6 networking + M7 WASM/WASI + M8 host files. Phase D complete: M9 framebuffer + M10 GUI/input. Phase E under way: M11 H-extension bring-up + M12 timer/preemptible vCPU.** Next: M13 - a real guest (Linux): a full guest device tree, PLIC/AIA + virtio device backends, and virtio-fs.
 
 ## What boots today (M0+M1)
 
@@ -596,13 +597,60 @@ hardware is in QEMU, the logic is host-tested).
   fetch through G-stage → ecall → trap-and-emulate → resume → halt) is proven.
   Shell: `vm`.
 
-**Honest scope.** One guest, one vCPU (a goroutine), a single 2 MiB G-stage
-megapage, emulated SBI console + shutdown, HS interrupts masked during the run
-(no timer-driven exit yet), and a payload honk fully controls. A real guest OS,
-VS-stage paging (`vsatp`), PLIC/AIA + virtio device backends, and a timer-driven
-scheduler land in M12 (small guest) and M13 (Linux + virtio-fs).
+M11's honest scope was: one guest, one vCPU, a single 2 MiB G-stage megapage,
+emulated SBI console + shutdown, and **HS interrupts masked during the run (no
+timer-driven exit)**. M12 lifts the last part.
 
-## Next: M12
+## Timer + preemptible vCPU (M12) - how it works
 
-A small real guest (rCore or RT-Thread): exercise SBI, a timer, and a simple
-driver path on top of the M11 mechanism, with the vCPU as a goroutine.
+M12 adds the pieces a real guest needs - a timer, interrupt injection, and a
+preemptible vCPU - and proves them against a payload honk controls
+(`kernel/vmm.TimerGuest`), the same discipline as M11. `board/virt/vmm.go` grows
+the SBI surface and the timer/injection machinery; `kernel/vmm` gains a tiny RV64
+assembler (`encode.go`) and the timer guest.
+
+- **A two-stage timer.** The guest arms a timer with SBI `set_timer`; honk
+  records the deadline and arms its **own** HS timer (via firmware SBI TIME,
+  since HS cannot write `mtimecmp`). When that HS timer fires *during the guest*
+  (V=1), it traps to honk; honk **injects a VS-timer interrupt** by setting
+  `hvip.VSTIP`, which - with the bit delegated to VS via `hideleg` - the
+  hardware delivers to the guest. The guest has installed its own VS trap
+  vector and enabled `sie.STIE`/`sstatus.SIE`, so it takes the interrupt, prints
+  a tick, and reprograms the timer (which withdraws the injection). `hcounteren.TM`
+  lets the guest read `time` to compute its deadline.
+- **Preemption (vCPU = goroutine).** honk keeps its HS timer armed for at most a
+  quantum, so it regains the hart from a running guest periodically (and a
+  wall-clock budget bounds a whole run) - even a guest that never yields is
+  preempted, the safety property that keeps it from hanging the machine. The
+  vCPU is an ordinary goroutine; honk's other harts run honk throughout.
+- **A broader SBI surface.** honk emulates Base `probe_extension` and TIME
+  `set_timer` alongside M11's legacy console + shutdown. The SBI numbers live in
+  one place (`kernel/vmm/sbi.go`); the emulator (`board/virt`) dispatches and
+  supplies the effects. The timer guest probes Base for TIME first, so it only
+  ticks if that emulation works.
+- **The run is one non-descheduling region.** The world switch + trap-and-emulate
+  loop is `//go:nosplit`, allocation-free, and never yields. On tamago (no async
+  preemption) such a region is never descheduled, so the vCPU goroutine cannot
+  migrate off its hart (keeping the hart-local CSRs valid) and never trips
+  honk's fixed-M-per-hart SMP model - a deschedule of a pinned vCPU would make
+  the runtime try to start an M beyond the parked harts. (This replaced an
+  initial `LockOSThread` design, which deadlocked exactly that way under GC.)
+- **Proof.** `go test -race ./kernel/vmm` decodes the generated timer guest and
+  checks its structure (the handler address, the SBI probe, the wait loop, the
+  branch targets) and the instruction encoders. The smoke test runs `vm timer`
+  under `-cpu rv64,h=true` and asserts `*****` (five injected timer interrupts,
+  delivered and handled) then the SBI shutdown - so the whole chain (probe →
+  arm → HS timer → inject `hvip.VSTIP` → guest handler → reprogram → halt) is
+  proven. Shell: `vm timer`.
+
+**Honest scope.** Still one guest, one vCPU, a single 2 MiB G-stage megapage,
+and a payload honk controls; the SBI surface is Base/TIME/console/shutdown.
+Loading a real third-party guest image, VS-stage paging (`vsatp`), PLIC/AIA +
+virtio device backends, virtio-fs, and time-sharing one hart between a vCPU and
+other honk goroutines land in M13.
+
+## Next: M13
+
+A real guest (Linux): a full guest device tree, PLIC/AIA + virtio device
+backends, and virtio-fs so the guest transparently mounts honk's files - the
+escape hatch for the long tail of real software.
