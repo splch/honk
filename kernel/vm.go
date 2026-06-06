@@ -30,7 +30,11 @@ const timerTicks = 5
 // another M13-groundwork demo: a guest that writes a token into its own RAM and
 // asks honk to print it via the SBI DBCN console - proving honk can read a
 // guest-supplied buffer through the G-stage (the keystone for device backends).
-// Guest output appears inline on honk's console.
+// `vm mmio` runs a third: a guest that loads/stores an emulated device register
+// at an unmapped guest-physical address, so honk catches the guest-page fault,
+// decodes the instruction, and emulates the register - MMIO trap-and-emulate,
+// the keystone for the interrupt controller and virtio backends. Guest output
+// appears inline on honk's console.
 func vmcmd(fields []string) {
 	if len(fields) > 1 && fields[1] == "timer" {
 		guest := vmm.TimerGuest('*', timerTicks)
@@ -56,6 +60,16 @@ func vmcmd(fields []string) {
 			len(guest))
 		fmt.Print("vm: guest console: ")
 		reason := virt.RunGuest(guest) // the guest's "dbcn" prints inline
+		fmt.Printf("\nvm: %s\n", reason)
+		return
+	}
+
+	if len(fields) > 1 && fields[1] == "mmio" {
+		guest := vmm.MMIOGuest()
+		fmt.Printf("vm: launching an mmio guest (%d bytes): trap-and-emulate a device register\n",
+			len(guest))
+		fmt.Print("vm: guest console: ")
+		reason := virt.RunGuest(guest) // the guest's "Mmio" prints inline via the emulated device
 		fmt.Printf("\nvm: %s\n", reason)
 		return
 	}

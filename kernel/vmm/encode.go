@@ -112,17 +112,24 @@ func bne(rs1, rs2, off int) uint32 {
 		(u>>1&0xf)<<8 | (u>>11&1)<<7 | 1<<12 | 0x63
 }
 
-// ld encodes `ld rd, off(rs1)` (I-type load doubleword: funct3=3, opcode=0x03).
-func ld(rd, rs1, off int) uint32 {
-	return uint32(off&0xfff)<<20 | uint32(rs1)<<15 | 3<<12 | uint32(rd)<<7 | 0x03
+// loadOp encodes an I-type load `rd, off(rs1)` with the given funct3 width/sign
+// (0=lb,1=lh,2=lw,3=ld,4=lbu,5=lhu,6=lwu), opcode 0x03.
+func loadOp(rd, rs1, off, funct3 int) uint32 {
+	return uint32(off&0xfff)<<20 | uint32(rs1)<<15 | uint32(funct3)<<12 | uint32(rd)<<7 | 0x03
 }
 
-// sd encodes `sd rs2, off(rs1)` (S-type store doubleword: funct3=3, opcode=0x23);
-// the immediate is split imm[11:5] (bits 31:25) and imm[4:0] (bits 11:7).
-func sd(rs2, rs1, off int) uint32 {
+// storeOp encodes an S-type store `rs2, off(rs1)` with the given funct3 width
+// (0=sb,1=sh,2=sw,3=sd), opcode 0x23; the immediate is split imm[11:5] (bits
+// 31:25) and imm[4:0] (bits 11:7).
+func storeOp(rs2, rs1, off, funct3 int) uint32 {
 	u := uint32(off)
-	return (u>>5&0x7f)<<25 | uint32(rs2)<<20 | uint32(rs1)<<15 | 3<<12 | (u&0x1f)<<7 | 0x23
+	return (u>>5&0x7f)<<25 | uint32(rs2)<<20 | uint32(rs1)<<15 | uint32(funct3)<<12 | (u&0x1f)<<7 | 0x23
 }
+
+func ld(rd, rs1, off int) uint32  { return loadOp(rd, rs1, off, 3) }   // doubleword
+func lbu(rd, rs1, off int) uint32 { return loadOp(rd, rs1, off, 4) }   // byte, zero-extended
+func sd(rs2, rs1, off int) uint32 { return storeOp(rs2, rs1, off, 3) } // doubleword
+func sb(rs2, rs1, off int) uint32 { return storeOp(rs2, rs1, off, 0) } // byte
 
 // loadImm32 builds rd = v for a 32-bit value whose bit 31 is clear, as
 // `lui rd, hi; addi rd, rd, lo`, choosing hi so the sign-extended addi corrects

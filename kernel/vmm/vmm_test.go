@@ -198,6 +198,104 @@ func TestGuestRange(t *testing.T) {
 	check("length overflow", base+0x1000, ^uint64(0), 0, 0, false) // start+length wraps
 }
 
+// TestDecodeMMIO checks the load/store decoder against hand-built instruction
+// words across every width and sign, and rejects the reserved funct3 encodings.
+// A wrong width, register, or store/load classification is exactly the silent
+// guest-fault class an MMIO emulator must not have.
+func TestDecodeMMIO(t *testing.T) {
+	cases := []struct {
+		name string
+		insn uint32
+		want MMIOAccess
+		ok   bool
+	}{
+		// loads: lbu t0,0(t1)=0x00033283? built via the encoders for fidelity.
+		{"lbu", loadOp(regT0, regT1, 0, 4), MMIOAccess{Width: 1, Reg: regT0, Signed: false}, true},
+		{"lb", loadOp(regA0, regT1, 0, 0), MMIOAccess{Width: 1, Reg: regA0, Signed: true}, true},
+		{"lh", loadOp(regA0, regT1, 0, 1), MMIOAccess{Width: 2, Reg: regA0, Signed: true}, true},
+		{"lw", loadOp(regA1, regT1, 0, 2), MMIOAccess{Width: 4, Reg: regA1, Signed: true}, true},
+		{"ld", loadOp(regA1, regT1, 0, 3), MMIOAccess{Width: 8, Reg: regA1, Signed: true}, true},
+		{"lhu", loadOp(regT0, regT1, 0, 5), MMIOAccess{Width: 2, Reg: regT0, Signed: false}, true},
+		{"lwu", loadOp(regT0, regT1, 0, 6), MMIOAccess{Width: 4, Reg: regT0, Signed: false}, true},
+		// stores
+		{"sb", storeOp(regT0, regT1, 0, 0), MMIOAccess{Store: true, Width: 1, Reg: regT0}, true},
+		{"sh", storeOp(regA0, regT1, 0, 1), MMIOAccess{Store: true, Width: 2, Reg: regA0}, true},
+		{"sw", storeOp(regA1, regT1, 0, 2), MMIOAccess{Store: true, Width: 4, Reg: regA1}, true},
+		{"sd", storeOp(regA1, regT1, 0, 3), MMIOAccess{Store: true, Width: 8, Reg: regA1}, true},
+		// reserved widths and non-load/store opcodes are refused.
+		{"load funct3=7", loadOp(regT0, regT1, 0, 7), MMIOAccess{}, false},
+		{"store funct3=4", storeOp(regT0, regT1, 0, 4), MMIOAccess{}, false},
+		{"addi (not mem)", addi(regT0, regT1, 0), MMIOAccess{}, false},
+	}
+	for _, c := range cases {
+		acc, ok := DecodeMMIO(c.insn)
+		if ok != c.ok || (ok && acc != c.want) {
+			t.Errorf("%s: DecodeMMIO(%#08x) = %+v,%v; want %+v,%v", c.name, c.insn, acc, ok, c.want, c.ok)
+		}
+	}
+}
+
+// TestSignExtend checks an MMIO load's width/sign handling: signed loads
+// sign-extend, unsigned/ld zero-extend or pass through.
+func TestSignExtend(t *testing.T) {
+	cases := []struct {
+		val    uint64
+		width  int
+		signed bool
+		want   uint64
+	}{
+		{0xff, 1, false, 0xff},                             // lbu
+		{0xff, 1, true, 0xffffffffffffffff},                // lb: -1
+		{0x7f, 1, true, 0x7f},                              // lb: +127
+		{0x8000, 2, true, 0xffffffffffff8000},              // lh
+		{0x8000, 2, false, 0x8000},                         // lhu
+		{0x80000000, 4, true, 0xffffffff80000000},          // lw
+		{0x80000000, 4, false, 0x80000000},                 // lwu
+		{0x1122334455667788, 8, false, 0x1122334455667788}, // ld: full width
+		{0xffff, 1, false, 0xff},                           // truncates to width first
+	}
+	for _, c := range cases {
+		if got := SignExtend(c.val, c.width, c.signed); got != c.want {
+			t.Errorf("SignExtend(%#x,%d,%v) = %#x, want %#x", c.val, c.width, c.signed, got, c.want)
+		}
+	}
+}
+
+// TestMMIOGuestEncoding decodes the generated MMIO payload and asserts it builds
+// MMIOBase, loads the magic register (an lbu of MMIORegMagic), and stores to the
+// out register (sb of MMIORegOut) - each load/store decoding as the emulator
+// expects - before shutting down.
+func TestMMIOGuestEncoding(t *testing.T) {
+	code := decode(t, MMIOGuest())
+
+	// loadImm32(regBase, MMIOBase) first.
+	if got := luiAddiVal(code[0], code[1]); got != int64(MMIOBase) {
+		t.Fatalf("prologue builds %#x, want MMIOBase %#x", got, MMIOBase)
+	}
+	// the first device access is a load (lbu) of the magic register.
+	if acc, ok := DecodeMMIO(code[2]); !ok || acc.Store || acc.Width != 1 {
+		t.Fatalf("code[2] = %#08x, want an lbu (load, width 1); got %+v ok=%v", code[2], acc, ok)
+	}
+	// at least three byte stores (the literal 'm','i','o') decode as sb.
+	stores := 0
+	for _, w := range code {
+		if acc, ok := DecodeMMIO(w); ok && acc.Store && acc.Width == 1 {
+			stores++
+		}
+	}
+	if stores < 4 { // the echoed magic + 'm','i','o'
+		t.Fatalf("found %d byte stores, want >= 4", stores)
+	}
+	// shutdown tail.
+	sd := len(code) - 3
+	if op, rd, _, _, imm := fields(code[sd]); op != 0x13 || rd != regA7 || imm != SBIShutdown {
+		t.Fatalf("shutdown = %#08x, want li a7,%d", code[sd], SBIShutdown)
+	}
+	if code[sd+1] != opEcall || code[sd+2] != opJ0 {
+		t.Fatalf("shutdown tail = %#08x %#08x", code[sd+1], code[sd+2])
+	}
+}
+
 // TestHgatp checks the hgatp value selects Sv39x4 and encodes the root PPN.
 func TestHgatp(t *testing.T) {
 	const rootPA = 0x9000_0000

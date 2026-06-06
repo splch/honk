@@ -710,12 +710,45 @@ real consumer - the modern buffered console, SBI DBCN.
   `guest console: dbcn` appears only if honk read the guest's buffer back
   through the G-stage. Shell: `vm dbcn`.
 
+## Toward M13: MMIO trap-and-emulate - how it works
+
+An emulated device (the interrupt controller, and every virtio backend) is
+reached the same way: the guest does a load/store to a device-register address
+that honk's G-stage does not map, which faults to honk; honk decodes the access
+and emulates the register. That trap-and-emulate path is now in place, proven
+against a hand-rolled guest.
+
+- **The decode is pure logic.** `vmm.DecodeMMIO` turns a 32-bit RV64 load/store
+  into (store?, width, register, signed), refusing anything else - including the
+  reserved funct3 widths - so a malformed access is reported, not
+  mis-emulated; `vmm.SignExtend` applies a load's width/sign. Both are
+  host-tested across every width (a wrong width or store/load classification is
+  the silent-fault class). honk gets the faulting *address* from `htval`, so the
+  decoder needs nothing about the base register or immediate.
+- **The fault dispatch is bare metal.** On a load/store guest-page fault
+  (`board/virt` `emulateMMIO`), honk reads the faulting instruction from guest
+  RAM at the guest pc (via `vmm.GuestRange`; the demo guest runs paging-off, so
+  its pc is a guest-physical address - a VS-paged guest would need a page-table
+  walk here), decodes it, takes the address from `htval<<2`, and reads/writes
+  the addressed register, then advances past the instruction. An unrecognized
+  address or instruction returns to the run loop as a real fault.
+- **The demo device + proof.** A two-register device (a magic register a load
+  returns, a console register a store prints) stands in for a real backend.
+  `vmm.MMIOGuest` loads the magic byte (proving load emulation) and prints it,
+  then stores 'm','i','o' (proving store emulation) - reaching honk's console
+  *only* through the emulated device, no SBI. `go test -race ./kernel/vmm`
+  covers the decoder, sign-extension, and the payload; the smoke test runs
+  `vm mmio` and asserts `guest console: Mmio`. Shell: `vm mmio`.
+
 ## Next: M13
 
 A real guest (Linux): a full guest device tree, PLIC/AIA + virtio device
 backends, and virtio-fs so the guest transparently mounts honk's files - the
-escape hatch for the long tail of real software. The paging (VS-stage + sized
-G-stage) and guest-memory-access (DBCN/`GuestRange`) keystones are in place; the
-remaining mechanism gaps are the interrupt-controller and virtio device backends
-themselves, and time-sharing a hart between a vCPU and other honk goroutines
-(the run loop is still one non-descheduling region).
+escape hatch for the long tail of real software. The keystones are now in place
+- two-stage paging (VS-stage + sized G-stage), reading guest memory by guest
+pointer (DBCN/`GuestRange`), and MMIO trap-and-emulate (`DecodeMMIO`). The
+remaining work is the devices themselves (an interrupt controller + external-
+interrupt injection via `hvip.VSEIP`, then virtio console/blk/net/fs backends
+over a guest virtqueue), a guest device tree, and time-sharing a hart between a
+vCPU and other honk goroutines (the run loop is still one non-descheduling
+region).

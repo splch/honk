@@ -516,10 +516,13 @@ is front-loaded; the OS logic on top of it is small because it is Go.
       multi-megapage G-stage map and the guest running its **own** VS-stage Sv39
       paging (`vsatp`) for genuine two-stage translation - shell `vm paging`.
       (2) honk reading a guest-supplied buffer from guest memory through the
-      G-stage (`vmm.GuestRange` + SBI DBCN `console_write`) - the keystone for
-      device backends - shell `vm dbcn`. Remaining for M13: the interrupt
-      controller and virtio device backends themselves, and time-sharing a
-      hart. See `docs/STATUS.md`.
+      G-stage (`vmm.GuestRange` + SBI DBCN `console_write`) - shell `vm dbcn`.
+      (3) MMIO trap-and-emulate: honk catching a guest's load/store to an
+      unmapped device-register address, decoding the instruction
+      (`vmm.DecodeMMIO`), and emulating the register - the keystone for the
+      interrupt controller and virtio backends - shell `vm mmio`. Remaining for
+      M13: the devices themselves (interrupt controller + virtio backends), a
+      guest device tree, and time-sharing a hart. See `docs/STATUS.md`.
 
 ---
 

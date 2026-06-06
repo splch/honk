@@ -170,6 +170,59 @@ func GuestRange(gpa, length, base, ramSize uint64) (start, end uint64, ok bool) 
 	return start, end, true
 }
 
+// MMIOAccess describes a guest load/store to an emulated device register, as
+// decoded from the faulting instruction. The host emulator gets the faulting
+// address from htval; this supplies the rest: direction, width, the register
+// (rd for a load, rs2 for a store), and whether a load sign-extends.
+type MMIOAccess struct {
+	Store  bool
+	Width  int // access width in bytes: 1, 2, 4, or 8
+	Reg    int // rd for a load, rs2 for a store
+	Signed bool
+}
+
+// DecodeMMIO decodes a 32-bit RV64 integer load/store into the fields the MMIO
+// emulator needs. ok is false for anything that is not such an instruction -
+// including the reserved funct3 widths - so the emulator reports an unexpected
+// fault rather than silently mis-emulating a malformed access. It is the
+// trap-and-emulate keystone every emulated device (interrupt controller, the
+// virtio backends to come) reuses, so it lives once here and is host-tested.
+//
+//go:nosplit
+func DecodeMMIO(insn uint32) (MMIOAccess, bool) {
+	funct3 := int((insn >> 12) & 7)
+	switch insn & 0x7f {
+	case 0x03: // LOAD: lb/lh/lw/ld (0..3), lbu/lhu/lwu (4..6); 7 reserved
+		if funct3 == 7 {
+			return MMIOAccess{}, false
+		}
+		return MMIOAccess{Width: 1 << (funct3 & 3), Reg: int((insn >> 7) & 0x1f), Signed: funct3 < 4}, true
+	case 0x23: // STORE: sb/sh/sw/sd (0..3); 4..7 reserved
+		if funct3 > 3 {
+			return MMIOAccess{}, false
+		}
+		return MMIOAccess{Store: true, Width: 1 << funct3, Reg: int((insn >> 20) & 0x1f)}, true
+	}
+	return MMIOAccess{}, false
+}
+
+// SignExtend returns val as an integer load of the given width (1/2/4/8 bytes)
+// would leave it in a register: truncated to the width, then sign-extended to
+// 64 bits when signed (lb/lh/lw) rather than zero-extended (lbu/lhu/lwu/ld).
+//
+//go:nosplit
+func SignExtend(val uint64, width int, signed bool) uint64 {
+	if width >= 8 {
+		return val
+	}
+	bits := uint(width) * 8
+	val &= (uint64(1) << bits) - 1
+	if signed && val&(uint64(1)<<(bits-1)) != 0 {
+		val |= ^uint64(0) << bits
+	}
+	return val
+}
+
 // The guest payloads are hand-rolled VS-mode programs honk fully controls, so
 // each milestone proves the H-extension mechanism against code it can decode
 // and host-test (the instruction encoders live in encode.go, the SBI numbers in
@@ -386,6 +439,46 @@ func DBCNGuest() []byte {
 	emit(opJ0) // guard against a missed stop
 
 	ins[probeBranch] = beq(regA1, regZero, (shutdownIdx-probeBranch)*4)
+	return assemble(ins)
+}
+
+// The M13-groundwork demo MMIO device honk emulates: a guest-physical register
+// window below guest RAM, so a guest access to it misses the G-stage map and
+// faults to honk's MMIO trap-and-emulate path. Shared by the guest payload and
+// the board emulator so they agree on the addresses (one owner).
+const (
+	MMIOBase     = 0x1000_0000  // device register window base (below GuestBase)
+	MMIORegMagic = MMIOBase + 0 // load: honk returns MMIOMagic
+	MMIORegOut   = MMIOBase + 8 // store: honk prints the low byte
+	MMIOMagic    = 'M'          // the byte a load of MMIORegMagic returns
+)
+
+// MMIOGuest builds a guest that proves MMIO trap-and-emulate: honk catching a
+// guest's load/store to an (unmapped) device-register address, decoding the
+// faulting instruction, emulating the register, and resuming. The guest loads
+// honk's magic byte from MMIORegMagic (proving load emulation) and prints it,
+// then stores 'm','i','o' to MMIORegOut (proving store emulation) - printing
+// "Mmio". No SBI console is used: the bytes reach honk's console only through
+// the emulated device.
+func MMIOGuest() []byte {
+	const (
+		regBase = regT1 // holds MMIOBase
+		regCh   = regT0 // the byte to load/store
+	)
+	var ins []uint32
+	emit := func(words ...uint32) { ins = append(ins, words...) }
+
+	emit(loadImm32(regBase, MMIOBase)...)            // MMIOBase has bit 31 clear
+	emit(lbu(regCh, regBase, MMIORegMagic-MMIOBase)) // load honk's magic ('M')
+	emit(sb(regCh, regBase, MMIORegOut-MMIOBase))    // print it (store emulation)
+	for _, c := range []byte{'m', 'i', 'o'} {
+		emit(addi(regCh, regZero, int(c)))
+		emit(sb(regCh, regBase, MMIORegOut-MMIOBase))
+	}
+
+	emit(addi(regA7, regZero, SBIShutdown))
+	emit(opEcall)
+	emit(opJ0) // guard against a missed stop
 	return assemble(ins)
 }
 

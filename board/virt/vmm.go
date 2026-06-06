@@ -239,6 +239,69 @@ func (r *vmRun) sbiSetTimer() (err, val uint64) {
 	return vmm.SBISuccess, 0
 }
 
+// emulateMMIO handles a guest load/store that missed the G-stage map by
+// emulating an honk device register: it reads the faulting instruction from
+// guest RAM at the guest pc (the demo guest runs paging-off, so its pc is a
+// guest-physical address; a VS-paged guest would need a page-table walk here),
+// decodes it (vmm.DecodeMMIO), takes the faulting address from htval, and reads
+// or writes the addressed register. It returns false for an access it does not
+// recognize, so the run loop reports a real fault. It is nosplit (it runs in
+// the non-descheduling guest-run region) and calls only nosplit/assembly code.
+//
+//go:nosplit
+func (r *vmRun) emulateMMIO() bool {
+	start, _, ok := vmm.GuestRange(r.v.pc, 4, vmm.GuestBase, uint64(len(r.mem)))
+	if !ok {
+		return false // pc not in guest RAM: not an MMIO access we can decode
+	}
+	insn := uint32(r.mem[start]) | uint32(r.mem[start+1])<<8 |
+		uint32(r.mem[start+2])<<16 | uint32(r.mem[start+3])<<24
+	acc, ok := vmm.DecodeMMIO(insn)
+	if !ok {
+		return false
+	}
+	gpa := readHtval() << 2 // htval holds the faulting guest-physical address >> 2
+	if acc.Store {
+		val := uint64(0) // x0 reads as zero (a guest may `sw x0, reg`)
+		if acc.Reg != 0 {
+			val = r.v.gpr[acc.Reg]
+		}
+		if !mmioStore(gpa, val) {
+			return false
+		}
+	} else {
+		val, ok := mmioLoad(gpa)
+		if !ok {
+			return false
+		}
+		if acc.Reg != 0 { // x0 stays hardwired zero
+			r.v.gpr[acc.Reg] = vmm.SignExtend(val, acc.Width, acc.Signed)
+		}
+	}
+	r.v.pc += 4 // the demo guest uses only 32-bit load/store
+	return true
+}
+
+// mmioLoad / mmioStore are the demo device: a magic register and a console-out
+// register (numbers in kernel/vmm). A real virtio/PLIC backend replaces these.
+//
+//go:nosplit
+func mmioLoad(gpa uint64) (uint64, bool) {
+	if gpa == vmm.MMIORegMagic {
+		return vmm.MMIOMagic, true
+	}
+	return 0, false
+}
+
+//go:nosplit
+func mmioStore(gpa, val uint64) bool {
+	if gpa == vmm.MMIORegOut {
+		sbiPutchar(byte(val))
+		return true
+	}
+	return false
+}
+
 // reportGuestFault prints an unexpected guest trap's CSRs straight to the SBI
 // console. It is nosplit (no allocation, no fmt) so it is safe inside the
 // guest-run region; the run then returns a constant reason.
@@ -392,6 +455,11 @@ func runGuest(r *vmRun, hgatp uint64) string {
 			}
 			r.armHSTimer()
 			continue
+		}
+		if cause == vmm.LoadGuestPageFault || cause == vmm.StoreGuestPageFault {
+			if r.emulateMMIO() { // a guest access to an emulated device register
+				continue
+			}
 		}
 		reportGuestFault(cause, r.v.pc)
 		reason = "guest fault (see console)"

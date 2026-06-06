@@ -138,9 +138,14 @@ EOF
 # into its OWN RAM and asks honk to print it via SBI DBCN console_write with a
 # guest-physical buffer pointer - so "guest console: dbcn" appears only if honk
 # read the guest's buffer back through the G-stage (the keystone for device
-# backends). No devices needed; the guests run from a G-stage-mapped RAM buffer.
-boot $'\nvm\nvm timer\nvm paging\nvm dbcn\nexit\n' "$VV"
-want "$VV" "vmm/M11+M12+paging+dbcn" <<'EOF'
+# backends). `vm mmio` (also M13 groundwork) runs a guest that loads/stores an
+# emulated device register at an unmapped guest-physical address: honk catches
+# the guest-page fault, decodes the instruction, and emulates the register, so
+# "guest console: Mmio" appears only if MMIO trap-and-emulate works (the magic
+# 'M' came from an emulated load, "mio" from emulated stores). No devices
+# needed; the guests run from a G-stage-mapped RAM buffer.
+boot $'\nvm\nvm timer\nvm paging\nvm dbcn\nvm mmio\nexit\n' "$VV"
+want "$VV" "vmm/M11+M12+paging+dbcn+mmio" <<'EOF'
 launching a VS-mode guest
 hello from a guest VM
 guest halted (SBI shutdown)
@@ -150,6 +155,8 @@ launching a paging guest
 guest enabled VS-stage paging
 launching a dbcn guest
 guest console: dbcn
+launching an mmio guest
+guest console: Mmio
 EOF
 
 # Run R: stateless reset clears the writable layer; the immutable core remains.
