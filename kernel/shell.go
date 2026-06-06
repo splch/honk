@@ -62,7 +62,7 @@ func exec(line string) {
 		fmt.Println("  help  harts  uptime  mem  echo <text>")
 		fmt.Println("  run [name]   ps   kill <pid>   crash   reap   stress [n]")
 		fmt.Println("  ls [dir]   cat <file>   cp <src> <dst>   put <key> <text>   rm <file>")
-		fmt.Println("  blk   fault  exit")
+		fmt.Println("  blk   reset --confirm   fault  exit")
 	case "harts":
 		fmt.Printf("harts: %d online  GOMAXPROCS=%d  this=hart %d\n",
 			virt.NumHarts(), runtime.GOMAXPROCS(-1), virt.CurrentHart())
@@ -123,6 +123,8 @@ func exec(line string) {
 		put(fields)
 	case "rm":
 		rm(fields)
+	case "reset":
+		reset(fields)
 
 	case "fault":
 		fmt.Println("fault: raising a supervisor exception...")
@@ -290,6 +292,25 @@ func rm(fields []string) {
 		return
 	}
 	fmt.Printf("rm: removed %s\n", p)
+}
+
+// reset is honk's stateless reset: it clears the writable kv layer so the
+// immutable, verified core shows through unshadowed. It requires --confirm
+// because it discards all persisted state.
+func reset(fields []string) {
+	if store == nil {
+		fmt.Println("reset: no writable layer (read-only core)")
+		return
+	}
+	if len(fields) < 2 || fields[1] != "--confirm" {
+		fmt.Println("reset: clears ALL state in the writable layer; re-run as: reset --confirm")
+		return
+	}
+	if err := store.Reset(); err != nil {
+		fmt.Printf("reset: %v\n", err)
+		return
+	}
+	fmt.Printf("reset: writable layer cleared (immutable core %s remains)\n", bootCore)
 }
 
 // worker is a cooperative background process: it ticks until its context is

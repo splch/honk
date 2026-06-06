@@ -38,6 +38,18 @@ func TestKVFSImplementsFS(t *testing.T) {
 	}
 }
 
+func TestFilesFSImplementsFS(t *testing.T) {
+	fsys := FilesFS(map[string][]byte{
+		"motd":         []byte("honk"),
+		"etc/hostname": []byte("honkbox"),
+		"etc/os":       []byte("honk 0.1"),
+		"a/b/c":        []byte("deep"),
+	})
+	if err := fstest.TestFS(fsys, "motd", "etc/hostname", "etc/os", "a/b/c"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOverlayShadowAndMerge(t *testing.T) {
 	lower := fstest.MapFS{
 		"motd":     {Data: []byte("core motd")},
@@ -75,6 +87,28 @@ func TestOverlayShadowAndMerge(t *testing.T) {
 	want = []string{"ip", "os"}
 	if !equal(got, want) {
 		t.Fatalf("ReadDir(etc) = %v, want %v", got, want)
+	}
+}
+
+// TestOverlayFSTest exercises the overlay against the io/fs contract. It is the
+// regression guard for opening a directory that exists in BOTH layers: a merged
+// ReadDir must agree with reading the directory through Open (fstest checks
+// both paths), so the union cannot leak only the upper layer's entries.
+func TestOverlayFSTest(t *testing.T) {
+	lower := fstest.MapFS{
+		"motd":      {Data: []byte("core")},
+		"etc/os":    {Data: []byte("honk")},
+		"etc/issue": {Data: []byte("hi")},
+		"a/b/deep":  {Data: []byte("x")},
+	}
+	upper := FilesFS(map[string][]byte{
+		"etc/hostname": []byte("honkbox"), // shares the 'etc' dir with lower
+		"a/b/top":      []byte("y"),       // shares the nested 'a/b' dir
+		"user":         []byte("u"),
+	})
+	o := Overlay(upper, lower)
+	if err := fstest.TestFS(o, "motd", "etc/os", "etc/issue", "etc/hostname", "a/b/deep", "a/b/top", "user"); err != nil {
+		t.Fatal(err)
 	}
 }
 

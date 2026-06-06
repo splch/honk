@@ -22,7 +22,7 @@ func (ip *indexPtr) store(m index) { ip.p.Store(&m) }
 // generation), and replays it - or formats a fresh device.
 func (s *Store) recover() (index, error) {
 	sb := make([]byte, s.bs)
-	active, gen, found := 0, uint64(0), false
+	active, gen, startSeq, found := 0, uint64(0), uint64(0), false
 
 	for slot := int64(0); slot < sbSlots; slot++ {
 		if err := s.dev.ReadBlocks(slot, sb); err != nil {
@@ -31,24 +31,26 @@ func (s *Store) recover() (index, error) {
 		if binary.LittleEndian.Uint32(sb[0:]) != sbMagic {
 			continue
 		}
-		if binary.LittleEndian.Uint32(sb[4:]) != crc32.ChecksumIEEE(sb[8:17]) {
+		if binary.LittleEndian.Uint32(sb[4:]) != crc32.ChecksumIEEE(sb[8:sbCRCEnd]) {
 			continue
 		}
 		if g := binary.LittleEndian.Uint64(sb[8:]); !found || g > gen {
 			active, gen, found = int(sb[16]), g, true
+			startSeq = binary.LittleEndian.Uint64(sb[sbStartSeq:])
 		}
 	}
 
 	if !found {
-		// Fresh (or unrecognized) device: format region A as empty.
-		s.active, s.gen, s.head, s.seq = 0, 0, 0, 0
-		if err := s.writeSuper(0, 0); err != nil {
+		// Fresh (or unrecognized) device: format region A as empty. The first
+		// record will have seq 1, so the startSeq floor is 1.
+		s.active, s.gen, s.head, s.seq, s.startSeq = 0, 0, 0, 0, 1
+		if err := s.writeSuper(0, 0, 1); err != nil {
 			return nil, err
 		}
 		return index{}, nil
 	}
 
-	s.active, s.gen = active, gen
+	s.active, s.gen, s.startSeq = active, gen, startSeq
 	return s.replay()
 }
 
@@ -89,7 +91,14 @@ func (s *Store) replay() (index, error) {
 			break // torn tail
 		}
 
-		if seq := binary.LittleEndian.Uint64(rec[8:]); seq > s.seq {
+		// A valid record whose seq is below the region's floor is a leftover
+		// from a previous life of this region (compaction/reset reuse regions
+		// without erasing them): the current log ends here.
+		seq := binary.LittleEndian.Uint64(rec[8:])
+		if seq < s.startSeq {
+			break
+		}
+		if seq > s.seq {
 			s.seq = seq
 		}
 		key := string(rec[recHeader : recHeader+keyLen])

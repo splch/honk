@@ -1,34 +1,40 @@
 # honk - build and run the pure-Go RISC-V 64 OS.
 
-GOENV := GOOS=tamago GOARCH=riscv64 GOOSPKG=github.com/usbarmory/tamago
-TAMAGO := go run github.com/usbarmory/tamago/cmd/tamago
+CORE_VERSION ?= 1
 
-.PHONY: all kernel run clean fmt vet test smoke
+.PHONY: all kernel run clean fmt vet test smoke coreimg
 
 all: kernel
 
-# Build the kernel ELF + boot trampoline (auto-installs tamago-go on first use).
+# Build the kernel ELF + boot trampoline (auto-installs tamago-go on first use;
+# build.sh also rebuilds the embedded core image).
 kernel honk.elf boot.bin:
 	tools/build.sh
+
+# Build the signed, Merkle-tree'd immutable core image the kernel embeds.
+coreimg kernel/core.img:
+	env -u GOOS -u GOARCH -u GOOSPKG go run ./tools/mkimage -version $(CORE_VERSION) kernel/core kernel/core.img
 
 # Boot honk under QEMU virt (OpenSBI M-mode firmware, honk as HS-mode payload).
 run: honk.elf boot.bin
 	tools/run-qemu.sh
 
 fmt:
-	gofmt -w kernel board
+	gofmt -w kernel board block tools
 
 # vet runs under the tamago toolchain so the GOOS=tamago files are analyzed.
-vet:
-	$(GOENV) $(TAMAGO) vet ./kernel ./kernel/... ./board/... ./block
+# The embedded core image must exist first (kernel/main embeds it).
+vet: coreimg
+	tools/vet.sh
 
-# Host race tests for the portable, pure-Go packages (process model, storage).
+# Host race tests for the portable, pure-Go packages (process model, storage,
+# image verity).
 test:
-	go test -race -count=1 ./kernel/proc/ ./kernel/kv/ ./kernel/vfs/ ./block/
+	go test -race -count=1 ./kernel/proc/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./block/
 
 # Build + boot under QEMU and assert expected output (CI gate).
 smoke:
 	tools/smoke-test.sh
 
 clean:
-	rm -f honk.elf boot.bin
+	rm -f honk.elf boot.bin kernel/core.img

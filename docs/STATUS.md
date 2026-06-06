@@ -22,9 +22,10 @@ distribution (`tamago-go`) is auto-built on first use into the OS cache dir.
 | **M1 IRQ + console + shell** | ✅ **complete** | honk S-mode trap vector (proper `sret`); UART RX interrupt → PLIC → ring → channel; interactive shell over the UART; S-mode exceptions print `scause`/`sepc`/`stval` and halt. |
 | **M2 process model** | ✅ **complete** | `proc` table = goroutine + `context` (cancel = kill) + capabilities; `run`/`ps`/`kill`/`crash`/`reap`/`stress` shell commands; `recover()` fault domains (a panicking process is reaped, kernel + siblings survive); race-tested (`go test -race ./kernel/proc`) and stressed under `-smp 4`. |
 | **M3 block device** | ✅ **complete** | `block.Device` interface with two backends: **NVMe-over-PCIe** (PCIe ECAM enumeration + BAR assignment, controller bring-up, admin+I/O queues, identify, PRP read/write - primary) and **virtio-blk** (virtio-mmio v2, split virtqueue - fallback). Both implement a `Flush` cache barrier. `blk` shell self-test; both verified for detection, read/write round-trip, and on-disk persistence; smoke test gates both. |
-| **M4 KV store + VFS** | ✅ **complete** | Crash-safe log-structured KV (`kernel/kv`) over `block.Device` - single-appender group commit, lock-free COW snapshot reads, double-buffered superblock, atomic-checkpoint compaction, replay-to-last-valid. **Durable by default** (each batch flushes before ack; compaction flushes the region before the superblock switch, so the checkpoint is host-crash-safe). **Hybrid value store:** small values inline in memory, larger ones disk-resident (index holds a verified pointer), so the store is not RAM-bounded. Exposed as `io/fs.FS` (`kernel/vfs`) overlaid on the embedded core; `ls`/`cat`/`cp`/`put`/`rm` shell. Host race-tested (incl. torn-tail, compaction, disk-resident round-trip), `fstest.TestFS`-validated, reboot persistence verified in QEMU. |
+| **M4 KV store + VFS** | ✅ **complete** | Crash-safe log-structured KV (`kernel/kv`) over `block.Device` - single-appender group commit, lock-free COW snapshot reads, double-buffered superblock, atomic-checkpoint compaction, replay-to-sequence-floor (safe region reuse). **Durable by default** (each batch flushes before ack; compaction flushes the region before the superblock switch, so the checkpoint is host-crash-safe). **Hybrid value store:** small values inline in memory, larger ones disk-resident (index holds a verified pointer), so the store is not RAM-bounded. Exposed as `io/fs.FS` (`kernel/vfs`) overlaid on the embedded core; `ls`/`cat`/`cp`/`put`/`rm` shell. Host race-tested (torn-tail, region-reuse leftovers, compaction, disk-resident, a 600-op crash-consistency property test, `fstest.TestFS` incl. the overlay), reboot persistence verified in QEMU. |
+| **M5 immutable core** | ✅ **complete** | Signed, Merkle-tree'd core image (`kernel/image`): a header with the SHA-256 Merkle root, an anti-rollback security version, and a file-table hash, signed with Ed25519. Boot `Verify`s the signature against an abstract **anchor** (QEMU = embedded dev key; silicon = OTP-fused key + monotonic counter behind the same interface), the version floor, the table hash, the Merkle root, and per-file bounds - failing closed. The device is partitioned (`block.Slice`) into **A/B image slots + the kv region**; boot `Select`s the highest valid version and falls back across the rest, with the embedded factory image as the guaranteed-good last candidate. The verified core is served read-only (`vfs.FilesFS`) under the writable kv overlay. **Stateless reset** (`kv.Reset`, shell `reset --confirm`) clears the writable layer crash-safely. `tools/mkimage` builds/signs images. Host race-tested (build/verify, tamper, anti-rollback, A/B + fallback, slot I/O); QEMU-verified (verification, A/B select + fallback, reset). |
 
-**Phase A complete; Phase B (storage) underway.** Next: M5 immutable core (verity + A/B).
+**Phase A complete; Phase B (storage) complete.** Next: M6 networking (virtio-net + gVisor) - Phase C, the networked appliance.
 
 ## What boots today (M0+M1)
 
@@ -213,13 +214,19 @@ mapping the design onto Go primitives (HONK.md §1):
   (one device write per batch, no write locks).
 - **Lock-free reads:** the index is an immutable map published via an atomic
   pointer; the appender copies-on-write and swaps it, so `Get` never blocks.
-- **Durability is the log:** records are CRC-checksummed; `Open` replays the
-  active region, stopping at the first torn/absent record (a crash leaves at
-  most an unacknowledged tail, which is discarded and overwritten).
+- **Durability is the log:** records are CRC-checksummed and carry a strictly
+  increasing sequence number; `Open` replays the active region, stopping at the
+  first torn/absent record *or* the first record below the region's recorded
+  sequence floor. The floor (`startSeq`, in the superblock) is what makes region
+  reuse safe: compaction and reset reuse a region without erasing it, so its
+  tail still holds **valid** records from a previous life - all with sequence
+  numbers below the floor, so replay stops at the true log end instead of
+  resurrecting them. A crash leaves at most an unacknowledged tail, discarded
+  and overwritten.
 - **Compaction is an atomic checkpoint:** the live set is rewritten into the
-  other of two log regions, then a *double-buffered* superblock is switched with
-  a single (atomic) block write. A crash mid-compaction leaves the old
-  superblock and region intact.
+  other of two log regions (under a fresh sequence floor), then a
+  *double-buffered* superblock is switched with a single (atomic) block write. A
+  crash mid-compaction leaves the old superblock and region intact.
 
 **Durability is real, not just guest-crash-safe.** `block.Device` has a `Flush`
 barrier (NVMe Flush; virtio-blk `VIRTIO_BLK_T_FLUSH` when negotiated; a no-op on
@@ -245,8 +252,12 @@ from slash-separated keys) and a union `Overlay`: the writable kv FS over the
 read-only embedded core (`//go:embed`), with the upper layer shadowing the
 lower. The shell's `ls`/`cat` read through the overlay; `cp`/`put`/`rm` write
 through the kv store. All of kv/vfs is pure Go: `go test -race ./kernel/kv
-./kernel/vfs` covers put/get/delete, replay, torn-tail, compaction, concurrency,
-and `fstest.TestFS`; reboot persistence is verified in QEMU by the smoke test.
+./kernel/vfs` covers put/get/delete, replay, torn-tail, region-reuse leftovers,
+compaction, disk-resident corruption, concurrency, and `fstest.TestFS` (incl.
+the overlay). A **crash-consistency property test** drives 600 randomized
+ops and, after every acknowledged operation, simulates power loss and reopens
+from the durable image, asserting the recovery matches the model exactly;
+reboot persistence is also verified in QEMU by the smoke test.
 
 ## Phase B - deliberately deferred (honest scope)
 
@@ -268,9 +279,48 @@ modern-OS storage stack. By design (HONK.md) or as tracked future work:
   error/timeout handling, and reliance on QEMU's coherent DMA (no cache
   maintenance for non-coherent real hardware).
 
-## Next: M5
+## Immutable core (M5) - how it works
 
-Immutable core: a `mkimage` tool builds a Merkle tree over the core image with
-an ed25519-signed root; boot verifies it through an anchored-boot interface and
-serves it read-only; A/B slots verify-then-switch with fallback; stateless
-reset clears the kv layer.
+`kernel/image` is honk's root-of-trust for the read-only core, mapped onto
+stdlib crypto (HONK.md §2):
+
+- **Format.** `tools/mkimage` packs `kernel/core/` into a blob: a fixed,
+  Ed25519-signed header (magic, format/security version, geometry, SHA-256
+  **Merkle root** over `LeafSize` data blocks, and a hash of the file table)
+  followed by the table and the data. The layout is deterministic (sorted
+  names), so builds are reproducible.
+- **Verify, fail closed.** `Verify` checks, in order: format, the signature over
+  the header (`crypto/ed25519`), the anti-rollback floor, the file-table hash,
+  the Merkle root recomputed over the data, and every file's bounds. Any tamper
+  anywhere is caught before a byte is served.
+- **The anchor.** The trust root is the `Anchor` interface. QEMU uses
+  `SoftwareAnchor` (the dev public key embedded as `image.DevPublicKey`, matched
+  by the fixed dev seed in `mkimage`); real silicon backs the same interface
+  with an OTP-fused key hash and a monotonic security-version counter. The dev
+  key signs only local QEMU images and is committed-safe.
+- **A/B slots.** The block device is partitioned with `block.Slice` into image
+  slot A, slot B, then the kv region. Boot reads both slots, considers them plus
+  the embedded factory image, and `Select`s the valid candidate with the highest
+  security version - invalid/corrupt candidates are skipped (verify-then-switch
+  with fallback), and the factory image is the guaranteed-good last resort. A
+  device too small to host slots runs kv-only on the embedded core.
+- **Served read-only.** The verified files become an `io/fs.FS` via
+  `vfs.FilesFS`, overlaid under the writable kv store (`vfs.Overlay`), so user
+  writes shadow the immutable core without altering it.
+- **Stateless reset.** `kv.Reset` (shell `reset --confirm`) publishes a fresh
+  empty region and switches the double-buffered superblock with one atomic
+  write - the same crash-safe checkpoint as compaction - so a reset clears all
+  writable state and the immutable core shows through unshadowed.
+
+All of `kernel/image` is pure Go: `go test -race ./kernel/image` covers the
+build/verify round-trip, signature/Merkle/table tamper detection, anti-rollback,
+A/B selection + fallback, and slot read/write. The QEMU smoke test seeds two
+slots to verify selection of the newer image and fallback when it is corrupted,
+and exercises `reset`.
+
+## Next: M6
+
+Networking: virtio-net + the gVisor stack (`go-net`), `net.SocketFunc =
+stack.Socket` lighting up the stdlib `net` package -> HTTP/HTTPS, SSH, DNS/NTP,
+`/pprof` and `/statsviz`, a `crypto/mlkem` demo. That completes the networked
+appliance (Phase C).

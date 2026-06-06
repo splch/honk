@@ -1,6 +1,7 @@
 # build artifacts
 /honk.elf
 /boot.bin
+/kernel/core.img
 *.o
 *.dtb
 

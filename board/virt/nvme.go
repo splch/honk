@@ -143,7 +143,11 @@ func (d *nvmeDevice) init() bool {
 	flbas := id[26] & 0xf
 	lbads := id[128+int(flbas)*4+2] // LBADS byte of the active LBA format
 	d.bs = 1 << lbads
-	return d.bs >= 512 && d.blocks > 0
+	// honk's PRP path assumes a logical block fits within one page, so a single
+	// chunk needs at most PRP1[+PRP2] and never a PRP list (rw splits at the
+	// page boundary). Refuse a block larger than a page rather than emit a
+	// malformed transfer (or divide perChunk to zero).
+	return d.bs >= 512 && d.bs <= nvmePageSize && d.blocks > 0
 }
 
 func (d *nvmeDevice) BlockSize() int { return d.bs }

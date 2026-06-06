@@ -1,43 +1,100 @@
-// honk - filesystem mount: the immutable embedded core overlaid by the kv store.
+// honk - filesystem mount: the immutable, integrity-verified core (M5) overlaid
+// by the writable kv store.
+//
+// The core is a signed, Merkle-tree'd image (kernel/image). honk holds two
+// on-disk update slots plus the embedded factory image and boots the valid one
+// with the highest security version, falling back across the rest (the A/B
+// model). The block device is partitioned: slot A, slot B, then the kv region.
 
 //go:build tamago && riscv64
 
 package main
 
 import (
-	"embed"
+	_ "embed"
+	"fmt"
 	"io/fs"
 	"path"
 	"strings"
 
+	"honk/block"
 	"honk/board/virt"
+	"honk/kernel/image"
 	"honk/kernel/kv"
 	"honk/kernel/vfs"
 )
 
-// coreFiles is the immutable core image baked into the kernel (read-only).
+// coreImage is the immutable core, built by tools/mkimage and baked into the
+// kernel as the factory image - the guaranteed-good A/B fallback.
 //
-//go:embed core
-var coreFiles embed.FS
+//go:embed core.img
+var coreImage []byte
 
 var (
-	store *kv.Store // persistent writable layer (nil if no block device)
-	root  fs.FS     // the mounted filesystem (overlay, or core-only)
+	store    *kv.Store // persistent writable layer (nil if no block device)
+	root     fs.FS     // the mounted filesystem (overlay, or core-only)
+	bootCore string    // which image booted, for the banner (e.g. "slot A v2")
 )
 
-// mountFS builds the root filesystem: the kv store (over the block device) as a
-// writable layer over the read-only embedded core. With no block device, only
-// the core is mounted (read-only).
+// minKVBlocks is the smallest kv region worth carving out behind the image
+// slots; below this the device hosts only kv and the slots are skipped.
+const minKVBlocks = 16
+
+// mountFS verifies the core image and builds the root filesystem: the writable
+// kv store (on the device tail) over the read-only verified core. With no block
+// device, only the verified core is mounted (read-only). A device too small for
+// the image slots hosts the kv store alone and uses the embedded core.
 func mountFS() {
-	core, _ := fs.Sub(coreFiles, "core")
+	anchor := image.SoftwareAnchor{Key: image.DevPublicKey} // Floor 0: see note below
+	var slotA, slotB []byte
+
 	if dev := virt.Block(); dev != nil {
-		if s, err := kv.Open(dev); err == nil {
-			store = s
-			root = vfs.Overlay(vfs.KVFS(s), core)
-			return
+		sb := image.SlotBlocks(dev.BlockSize())
+		if dev.Blocks() >= 2*sb+minKVBlocks {
+			slotA, _ = image.ReadSlot(dev, 0)
+			slotB, _ = image.ReadSlot(dev, sb)
+			openKV(block.Slice(dev, 2*sb, dev.Blocks()-2*sb))
+		} else {
+			openKV(dev) // too small to partition: kv gets the whole device
 		}
 	}
-	root = core
+
+	// Verify-then-switch with fallback: the factory image is listed last as the
+	// guaranteed-good candidate. Anti-rollback is enforced by the image layer
+	// (Anchor.MinVersion); the QEMU software anchor pins the floor at 0, and a
+	// real board backs it with a monotonic OTP counter instead.
+	img, idx, err := image.Select(anchor, slotA, slotB, coreImage)
+	if err != nil {
+		fmt.Printf("honk: FATAL no verifiable core image: %v\n", err)
+		virt.Shutdown() // honk has no core to serve; do not run unverified.
+	}
+	bootCore = fmt.Sprintf("%s v%d", coreSource(idx), img.SecVersion)
+	fmt.Printf("honk: core verified - %s\n", bootCore)
+
+	core := vfs.FilesFS(img.Files())
+	if store != nil {
+		root = vfs.Overlay(vfs.KVFS(store), core)
+	} else {
+		root = core
+	}
+}
+
+func openKV(dev block.Device) {
+	if s, err := kv.Open(dev); err == nil {
+		store = s
+	}
+}
+
+// coreSource names the A/B candidate that booted.
+func coreSource(idx int) string {
+	switch idx {
+	case 0:
+		return "slot A"
+	case 1:
+		return "slot B"
+	default:
+		return "embedded factory"
+	}
 }
 
 // fsPath normalizes a shell path argument to an io/fs path (relative, cleaned,

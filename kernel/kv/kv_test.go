@@ -2,6 +2,7 @@ package kv
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"testing"
@@ -226,6 +227,95 @@ func TestCompaction(t *testing.T) {
 	mustGet(t, s, "counter", "199")
 	mustGet(t, s, "a", "A")
 	mustGet(t, s, "b", "B")
+}
+
+// TestDiskResidentCorruptLength ensures a disk-resident value whose on-disk
+// length field is corrupted to an implausible size is treated as stale (the
+// location is no longer a valid record for the key) rather than driving a huge
+// allocation or an I/O error. The value becomes unreadable, but the store does
+// not OOM or panic - the graceful degradation a storage layer owes a bad disk.
+func TestDiskResidentCorruptLength(t *testing.T) {
+	dev := block.NewMemory(256, 512)
+	s := open(t, dev)
+	defer s.Close()
+
+	if err := s.Put("big", bytes.Repeat([]byte("Q"), 4096)); err != nil { // disk-resident
+		t.Fatal(err)
+	}
+	e := s.cur.load()["big"]
+	if e.val != nil {
+		t.Fatal("expected a disk-resident value")
+	}
+
+	blk := make([]byte, 512)
+	if err := dev.ReadBlocks(e.block, blk); err != nil {
+		t.Fatal(err)
+	}
+	binary.LittleEndian.PutUint32(blk[24:], 0xffffffff) // valLen -> ~4 GiB
+	if err := dev.WriteBlocks(e.block, blk); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get("big"); err != ErrNotFound {
+		t.Fatalf("Get with corrupt length: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestReset(t *testing.T) {
+	dev := block.NewMemory(64, 512)
+	s := open(t, dev)
+	s.Put("hostname", []byte("honk"))
+	s.Put("etc/ip", []byte("10.0.0.1"))
+	big := bytes.Repeat([]byte("Z"), 2048) // disk-resident value too
+	s.Put("blob", big)
+
+	if err := s.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if s.Len() != 0 {
+		t.Fatalf("Len after reset = %d, want 0", s.Len())
+	}
+	mustMissing(t, s, "hostname")
+	mustMissing(t, s, "blob")
+
+	// The store is usable after reset, and the empty state persists across a
+	// reopen (replay must not resurrect the pre-reset records).
+	if err := s.Put("fresh", []byte("start")); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s = open(t, dev)
+	defer s.Close()
+	mustGet(t, s, "fresh", "start")
+	mustMissing(t, s, "hostname")
+	mustMissing(t, s, "etc/ip")
+	mustMissing(t, s, "blob")
+	if s.Len() != 1 {
+		t.Fatalf("Len after reset+reopen = %d, want 1", s.Len())
+	}
+}
+
+// TestCompactionLeftoverNotReplayed guards the crash-consistency invariant that
+// replay must not read stale records left in a region's tail from a previous
+// life. Overwriting one key forces alternating compactions; ending on a SHORT
+// final region leaves valid older records beyond the true log end. A correct
+// store recovers only the live value.
+func TestCompactionLeftoverNotReplayed(t *testing.T) {
+	dev := block.NewMemory(16, 512) // regionLen = (16-2)/2 = 7
+	s := open(t, dev)
+	for i := 0; i <= 14; i++ { // enough overwrites to reuse both regions twice
+		if err := s.Put("k", []byte(fmt.Sprintf("v%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+
+	s = open(t, dev) // replay
+	defer s.Close()
+	mustGet(t, s, "k", "v14")
+	if s.Len() != 1 {
+		t.Fatalf("Len = %d, want 1 (stale leftover records resurrected on replay)", s.Len())
+	}
 }
 
 func TestConcurrent(t *testing.T) {

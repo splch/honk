@@ -20,13 +20,58 @@ import (
 	"honk/kernel/kv"
 )
 
+// source is the minimal backing for a synthesized filesystem: a flat set of
+// slash-separated keys mapping to byte values, queried without reading a value
+// where possible. Both the writable kv store and an immutable image's verified
+// file map satisfy it, so one synthesizer (synthFS) presents either as an
+// io/fs.FS with directories inferred from the key set.
+type source interface {
+	keys() []string
+	get(name string) ([]byte, bool)
+	size(name string) (int64, bool)
+}
+
 // KVFS returns a read-only io/fs.FS view of a kv store. Keys are slash-separated
 // paths; directories are synthesized from the key set.
-func KVFS(s *kv.Store) fs.FS { return &kvFS{s} }
+func KVFS(s *kv.Store) fs.FS { return &synthFS{kvSource{s}} }
 
-type kvFS struct{ s *kv.Store }
+// FilesFS returns a read-only io/fs.FS over a static set of files (e.g. the
+// verified contents of an immutable image). The map and its slices are treated
+// as read-only.
+func FilesFS(files map[string][]byte) fs.FS { return &synthFS{mapSource{files}} }
 
-func (f *kvFS) Open(name string) (fs.File, error) {
+type kvSource struct{ s *kv.Store }
+
+func (k kvSource) keys() []string { return k.s.Keys() }
+func (k kvSource) get(name string) ([]byte, bool) {
+	v, err := k.s.Get(name)
+	return v, err == nil
+}
+func (k kvSource) size(name string) (int64, bool) { return k.s.Size(name) }
+
+type mapSource struct{ m map[string][]byte }
+
+func (s mapSource) keys() []string {
+	out := make([]string, 0, len(s.m))
+	for k := range s.m {
+		out = append(out, k)
+	}
+	return out
+}
+func (s mapSource) get(name string) ([]byte, bool) {
+	v, ok := s.m[name]
+	return v, ok
+}
+func (s mapSource) size(name string) (int64, bool) {
+	v, ok := s.m[name]
+	return int64(len(v)), ok
+}
+
+// synthFS presents a source as a read-only io/fs.FS, synthesizing directories
+// from slash-separated keys.
+type synthFS struct{ src source }
+
+func (f *synthFS) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
@@ -34,26 +79,26 @@ func (f *kvFS) Open(name string) (fs.File, error) {
 		entries, _ := f.ReadDir(name)
 		return &dirFile{info: info{name: path.Base(name), dir: true}, entries: entries}, nil
 	}
-	if v, err := f.s.Get(name); err == nil {
+	if v, ok := f.src.get(name); ok {
 		return &dataFile{info: info{name: path.Base(name), size: int64(len(v))}, r: bytes.NewReader(v)}, nil
 	}
 	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 }
 
-func (f *kvFS) Stat(name string) (fs.FileInfo, error) {
+func (f *synthFS) Stat(name string) (fs.FileInfo, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrInvalid}
 	}
 	if name == "." || f.isDir(name) {
 		return info{name: path.Base(name), dir: true}, nil
 	}
-	if sz, ok := f.s.Size(name); ok { // size without reading the value
+	if sz, ok := f.src.size(name); ok { // size without reading the value
 		return info{name: path.Base(name), size: sz}, nil
 	}
 	return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
 }
 
-func (f *kvFS) ReadDir(name string) ([]fs.DirEntry, error) {
+func (f *synthFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrInvalid}
 	}
@@ -63,7 +108,7 @@ func (f *kvFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	}
 	// child base name -> isDir (a name with descendants is a directory).
 	kind := map[string]bool{}
-	for _, k := range f.s.Keys() {
+	for _, k := range f.src.keys() {
 		if !strings.HasPrefix(k, prefix) {
 			continue
 		}
@@ -87,7 +132,7 @@ func (f *kvFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	for _, n := range names {
 		i := info{name: n, dir: kind[n]}
 		if !i.dir {
-			if sz, ok := f.s.Size(prefix + n); ok { // size without reading the value
+			if sz, ok := f.src.size(prefix + n); ok { // size without reading the value
 				i.size = sz
 			}
 		}
@@ -96,9 +141,9 @@ func (f *kvFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	return out, nil
 }
 
-func (f *kvFS) isDir(name string) bool {
+func (f *synthFS) isDir(name string) bool {
 	prefix := name + "/"
-	for _, k := range f.s.Keys() {
+	for _, k := range f.src.keys() {
 		if strings.HasPrefix(k, prefix) {
 			return true
 		}
@@ -114,9 +159,31 @@ type overlay struct{ upper, lower fs.FS }
 
 func (o *overlay) Open(name string) (fs.File, error) {
 	if f, err := o.upper.Open(name); err == nil {
-		return f, nil
+		return o.resolve(name, f)
 	}
-	return o.lower.Open(name)
+	f, err := o.lower.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return o.resolve(name, f)
+}
+
+// resolve returns f for a regular file, but for a directory it returns a fresh
+// file whose entries are the MERGED union of both layers - so opening a
+// directory and reading it agrees with ReadDir even when the directory exists
+// in both layers (the io/fs contract; otherwise Open would leak only one
+// layer). f is the single-layer handle that opened the name.
+func (o *overlay) resolve(name string, f fs.File) (fs.File, error) {
+	fi, err := f.Stat()
+	if err != nil || !fi.IsDir() {
+		return f, err
+	}
+	f.Close()
+	entries, err := o.ReadDir(name)
+	if err != nil {
+		return nil, err
+	}
+	return &dirFile{info: info{name: path.Base(name), dir: true}, entries: entries}, nil
 }
 
 func (o *overlay) Stat(name string) (fs.FileInfo, error) {

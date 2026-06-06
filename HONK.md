@@ -338,6 +338,25 @@ is front-loaded; the OS logic on top of it is small because it is Go.
      `docs/STATUS.md`.
 6. **M5 Immutable core.** `mkimage` verity + A/B; boot verifies + serves R-O;
    stateless reset.
+   - *Status:* **COMPLETE + verified.** `kernel/image` (pure Go, host
+     race-tested) is a signed, Merkle-tree'd (`crypto/sha256`) core image: a
+     fixed header carrying the Merkle root, an anti-rollback security version,
+     and a file-table hash is signed with `crypto/ed25519`; `Verify` checks the
+     signature against an abstract **anchor**, the version floor, the table
+     hash, the Merkle root, and per-file bounds, failing closed. The QEMU
+     anchor (`SoftwareAnchor`) embeds the dev public key; silicon swaps in an
+     OTP-fused key + monotonic counter behind the same interface. The block
+     device is partitioned (`block.Slice`) into **A/B image slots + the kv
+     region**; boot `Select`s the valid slot with the highest version and falls
+     back across the rest (the embedded factory image is the guaranteed-good
+     last candidate). The verified core is served read-only (`vfs.FilesFS`)
+     under the writable kv overlay. **Stateless reset** (`kv.Reset`, shell
+     `reset --confirm`) clears the writable layer crash-safely so the immutable
+     core shows through. `tools/mkimage` builds/signs images; `make vet` now
+     runs under the tamago toolchain. Host race-tested (build/verify, tamper
+     detection, anti-rollback, A/B + fallback, slot I/O) and smoke-tested in
+     QEMU (verification, A/B select + fallback, reset). **Phase B complete.**
+     See `docs/STATUS.md`.
 
 **Phase C - the everyday networked OS**
 7. **M6 Networking.** virtio-net + gVisor; SSH/HTTP/HTTPS, `/pprof`, `/statsviz`;
