@@ -94,9 +94,14 @@ func (s *Store) replay() (index, error) {
 		}
 		key := string(rec[recHeader : recHeader+keyLen])
 		if rec[16] == opPut {
-			v := make([]byte, valLen)
-			copy(v, rec[recHeader+keyLen:n])
-			idx[key] = v
+			if valLen <= inlineMax {
+				v := make([]byte, valLen)
+				copy(v, rec[recHeader+keyLen:n])
+				idx[key] = entry{val: v}
+			} else {
+				// Disk-resident: record the location, don't cache the value.
+				idx[key] = entry{block: start + off, vlen: int32(valLen)}
+			}
 		} else {
 			delete(idx, key)
 		}

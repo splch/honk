@@ -281,7 +281,7 @@ func rm(fields []string) {
 		fmt.Println("rm: invalid path")
 		return
 	}
-	if _, exists := store.Get(p); !exists {
+	if !store.Has(p) {
 		fmt.Printf("rm: %s: not in writable layer\n", p)
 		return
 	}

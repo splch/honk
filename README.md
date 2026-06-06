@@ -25,7 +25,7 @@ is downloaded and built automatically on first use.
 kernel/        the HS-mode Go program (the OS): boot, SMP demo, shell
 kernel/proc/   process model: goroutine + context + capabilities (host-tested)
 block/         block-device interface + in-memory device (host-tested)
-kernel/kv/     crash-safe log-structured key/value store (host-tested)
+kernel/kv/     crash-safe log-structured key/value store, disk-resident (host-tested)
 kernel/vfs/    io/fs.FS over the kv store + overlay on the embedded core (host-tested)
 board/virt/    QEMU virt board: startup, SMP, traps, PLIC, UART, PCIe/NVMe, virtio-blk, SBI
 tools/         build.sh, run-qemu.sh, smoke-test.sh, mkboot (boot trampoline)

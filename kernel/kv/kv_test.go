@@ -20,12 +20,19 @@ func open(t *testing.T, dev block.Device) *Store {
 
 func mustGet(t *testing.T, s *Store, key, want string) {
 	t.Helper()
-	v, ok := s.Get(key)
-	if !ok {
-		t.Fatalf("Get(%q): missing", key)
+	v, err := s.Get(key)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", key, err)
 	}
 	if string(v) != want {
 		t.Fatalf("Get(%q) = %q, want %q", key, v, want)
+	}
+}
+
+func mustMissing(t *testing.T, s *Store, key string) {
+	t.Helper()
+	if _, err := s.Get(key); err != ErrNotFound {
+		t.Fatalf("Get(%q) err = %v, want ErrNotFound", key, err)
 	}
 }
 
@@ -45,9 +52,7 @@ func TestPutGetDelete(t *testing.T) {
 	if err := s.Delete("ip"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.Get("ip"); ok {
-		t.Fatal("ip present after Delete")
-	}
+	mustMissing(t, s, "ip")
 	if s.Len() != 1 {
 		t.Fatalf("Len = %d, want 1", s.Len())
 	}
@@ -71,9 +76,7 @@ func TestReplayAcrossReopen(t *testing.T) {
 	mustGet(t, s, "k0", "v0")
 	mustGet(t, s, "k5", "updated")
 	mustGet(t, s, "k19", "v19")
-	if _, ok := s.Get("k7"); ok {
-		t.Fatal("k7 present after delete + replay")
-	}
+	mustMissing(t, s, "k7")
 	if s.Len() != 19 {
 		t.Fatalf("Len = %d, want 19", s.Len())
 	}
@@ -101,8 +104,76 @@ func TestTornTailDiscarded(t *testing.T) {
 	defer s.Close()
 	mustGet(t, s, "a", "1")
 	mustGet(t, s, "b", "2")
-	if _, ok := s.Get("c"); ok {
-		t.Fatal("torn record c survived replay")
+	mustMissing(t, s, "c")
+}
+
+func TestDiskResidentValues(t *testing.T) {
+	dev := block.NewMemory(256, 512)
+	s := open(t, dev)
+
+	small := []byte("tiny")
+	big := bytes.Repeat([]byte("X"), 4096) // > inlineMax => disk-resident
+	if err := s.Put("small", small); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("big", big); err != nil {
+		t.Fatal(err)
+	}
+
+	// small is cached inline; big is a pointer to the log (val == nil).
+	m := s.cur.load()
+	if m["small"].val == nil {
+		t.Fatal("small value should be inline")
+	}
+	if m["big"].val != nil {
+		t.Fatal("big value should be disk-resident (val == nil)")
+	}
+	if m["big"].block == 0 || int(m["big"].vlen) != len(big) {
+		t.Fatalf("big entry = %+v, want a disk pointer with vlen %d", m["big"], len(big))
+	}
+
+	// Get round-trips both (reading big from disk); Size needs no read.
+	mustGet(t, s, "small", "tiny")
+	if v, err := s.Get("big"); err != nil || !bytes.Equal(v, big) {
+		t.Fatalf("Get(big): len %d, %v", len(v), err)
+	}
+	if sz, ok := s.Size("big"); !ok || sz != int64(len(big)) {
+		t.Fatalf("Size(big) = %d, %v", sz, ok)
+	}
+	s.Close()
+
+	// After replay the value stays disk-resident (the pointer is restored, not
+	// the value), and still reads back.
+	s = open(t, dev)
+	defer s.Close()
+	if s.cur.load()["big"].val != nil {
+		t.Fatal("big should still be disk-resident after replay")
+	}
+	if v, err := s.Get("big"); err != nil || !bytes.Equal(v, big) {
+		t.Fatalf("Get(big) after replay: %v", err)
+	}
+}
+
+func TestCompactionMovesDiskValues(t *testing.T) {
+	// Small device so overwriting a large value forces compaction, which must
+	// read the disk-resident value from the old region and rewrite it.
+	dev := block.NewMemory(64, 512)
+	s := open(t, dev)
+	defer s.Close()
+
+	big := bytes.Repeat([]byte("Z"), 2048)
+	for i := 0; i < 100; i++ {
+		v := append([]byte(fmt.Sprintf("%03d:", i)), big...)
+		if err := s.Put("blob", v); err != nil {
+			t.Fatalf("put #%d: %v", i, err)
+		}
+	}
+	if s.gen == 0 {
+		t.Fatal("expected compaction")
+	}
+	v, err := s.Get("blob")
+	if err != nil || !bytes.HasPrefix(v, []byte("099:")) || len(v) != 4+len(big) {
+		t.Fatalf("blob = %d bytes prefix %q, %v", len(v), v[:min(4, len(v))], err)
 	}
 }
 
@@ -169,9 +240,9 @@ func TestConcurrent(t *testing.T) {
 					last = i
 				}
 			}
-			v, ok := s.Get(fmt.Sprintf("w%d-k%d", w, k))
-			if !ok || !bytes.Equal(v, []byte(fmt.Sprintf("%d", last))) {
-				t.Fatalf("w%d-k%d = %q (ok=%v), want %d", w, k, v, ok, last)
+			v, err := s.Get(fmt.Sprintf("w%d-k%d", w, k))
+			if err != nil || !bytes.Equal(v, []byte(fmt.Sprintf("%d", last))) {
+				t.Fatalf("w%d-k%d = %q (err=%v), want %d", w, k, v, err, last)
 			}
 		}
 	}

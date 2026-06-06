@@ -329,7 +329,9 @@ is front-loaded; the OS logic on top of it is small because it is Go.
    - *Status:* **COMPLETE + verified.** `kernel/kv` = crash-safe log-structured
      KV over `block.Device` (single-appender group commit, lock-free COW
      snapshot reads, double-buffered superblock, atomic-checkpoint compaction,
-     replay-to-last-valid). `kernel/vfs` = nested `io/fs.FS` over the KV +
+     replay-to-last-valid). Hybrid value residency: small values inline in
+     memory, larger ones disk-resident (verified pointer), so the store is not
+     RAM-bounded. `kernel/vfs` = nested `io/fs.FS` over the KV +
      union `Overlay` of the writable KV over the read-only `//go:embed` core.
      Shell `ls`/`cat`/`cp`/`put`/`rm`. Host race-tested (torn-tail, compaction,
      concurrency) + `fstest.TestFS`; reboot persistence verified in QEMU. See

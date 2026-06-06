@@ -3,3 +3,7 @@ Welcome to honk - a modern pure-Go RISC-V 64 operating system.
 This file lives in the immutable, embedded core image (read-only). Files you
 write with `cp` land in the persistent kv store, which shadows the core in the
 overlay filesystem.
+
+The kv store keeps small values in memory and spills larger ones (like this
+message) to disk, so the store is not bounded by RAM; `cp motd readme` therefore
+exercises the disk-resident value path, and the copy survives a reboot.

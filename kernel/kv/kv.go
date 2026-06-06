@@ -45,9 +45,32 @@ const (
 
 	opPut = 1
 	opDel = 2
+
+	// inlineMax is the largest value kept in memory; larger values are
+	// disk-resident (the index holds only a pointer to the log record).
+	inlineMax = 256
 )
 
-type index = map[string][]byte
+// entry is an index slot: an inline value held in memory, or a pointer to a
+// disk-resident value's log record (val == nil). The on-disk record always
+// holds the full key+value regardless; entry only decides what is cached.
+type entry struct {
+	val   []byte // inline value (small); nil if the value is disk-resident
+	block int64  // record start block of a disk-resident value
+	vlen  int32  // length of a disk-resident value (for Size without I/O)
+}
+
+type index = map[string]entry
+
+// entryFor builds an index entry for val whose record starts at block: inline
+// if small (reusing val, which the caller has already privately copied), else a
+// pointer to the disk-resident record.
+func entryFor(val []byte, block int64) entry {
+	if len(val) <= inlineMax {
+		return entry{val: val}
+	}
+	return entry{block: block, vlen: int32(len(val))}
+}
 
 // writeReq is one pending mutation handed to the appender.
 type writeReq struct {
@@ -106,11 +129,47 @@ func Open(dev block.Device) (*Store, error) {
 	return s, nil
 }
 
-// Get returns the value for key (lock-free), reporting whether it exists. The
-// returned slice must not be modified.
-func (s *Store) Get(key string) ([]byte, bool) {
-	v, ok := s.cur.load()[key]
-	return v, ok
+// Get returns the value for key, or ErrNotFound. For an inline value this is a
+// lock-free index read; for a disk-resident value it reads the log record
+// (verifying it, so a location recycled by compaction is detected and retried).
+// The returned slice must not be modified.
+func (s *Store) Get(key string) ([]byte, error) {
+	for retry := 0; retry < 8; retry++ {
+		e, ok := s.cur.load()[key]
+		if !ok {
+			return nil, ErrNotFound
+		}
+		if e.val != nil {
+			return e.val, nil
+		}
+		v, stale, err := s.readRecordValue(e.block, key)
+		if err != nil {
+			return nil, err
+		}
+		if !stale {
+			return v, nil
+		}
+		// The record moved (compaction recycled the location); reload.
+	}
+	return nil, ErrNotFound
+}
+
+// Has reports whether key exists (lock-free, no I/O).
+func (s *Store) Has(key string) bool {
+	_, ok := s.cur.load()[key]
+	return ok
+}
+
+// Size returns the value length for key (lock-free, no I/O).
+func (s *Store) Size(key string) (int64, bool) {
+	e, ok := s.cur.load()[key]
+	if !ok {
+		return 0, false
+	}
+	if e.val != nil {
+		return int64(len(e.val)), true
+	}
+	return int64(e.vlen), true
 }
 
 // Keys returns a snapshot of all keys, unordered.
@@ -125,6 +184,38 @@ func (s *Store) Keys() []string {
 
 // Len returns the number of keys.
 func (s *Store) Len() int { return len(s.cur.load()) }
+
+// readRecordValue reads a disk-resident value from the log record at block,
+// returning stale=true if the record there is no longer key's (a magic/CRC
+// mismatch, or a different key - i.e. the location was reused by compaction).
+func (s *Store) readRecordValue(block int64, key string) (val []byte, stale bool, err error) {
+	hdr := make([]byte, s.bs)
+	if err := s.dev.ReadBlocks(block, hdr); err != nil {
+		return nil, false, err
+	}
+	if binary.LittleEndian.Uint32(hdr[0:]) != recMagic {
+		return nil, true, nil
+	}
+	keyLen := int(binary.LittleEndian.Uint32(hdr[20:]))
+	valLen := int(binary.LittleEndian.Uint32(hdr[24:]))
+	n := recHeader + keyLen + valLen
+	rec := hdr
+	if blocks := int64((n + s.bs - 1) / s.bs); blocks > 1 {
+		rec = make([]byte, blocks*int64(s.bs))
+		if err := s.dev.ReadBlocks(block, rec); err != nil {
+			return nil, false, err
+		}
+	}
+	if binary.LittleEndian.Uint32(rec[4:]) != crc32.ChecksumIEEE(rec[8:n]) {
+		return nil, true, nil
+	}
+	if string(rec[recHeader:recHeader+keyLen]) != key {
+		return nil, true, nil
+	}
+	v := make([]byte, valLen)
+	copy(v, rec[recHeader+keyLen:n])
+	return v, false, nil
+}
 
 // Put stores val under key, returning once it is committed to the device.
 func (s *Store) Put(key string, val []byte) error {
@@ -184,41 +275,61 @@ func (s *Store) appender() {
 	}
 }
 
-// commit applies a batch: build the next index (copy-on-write), serialize the
-// records, write them to the active region (compacting first if needed), and
-// publish the new index.
+// commit applies a batch: serialize the records, write them to the active
+// region (checkpointing first if they don't fit), and publish the new index
+// (copy-on-write). Disk-resident values are not cached - their entry points at
+// the record just written.
 func (s *Store) commit(batch []*writeReq) error {
-	next := make(index, len(s.cur.load())+len(batch))
-	for k, v := range s.cur.load() {
-		next[k] = v
-	}
+	base := s.regionStart[s.active] + s.head
 
+	type pend struct {
+		key string
+		e   entry
+		del bool
+	}
+	var pending []pend
 	var recs []byte
+	var off int64
 	for _, req := range batch {
 		s.seq++
-		recs = append(recs, s.record(req.op, req.key, req.val)...)
+		r := s.record(req.op, req.key, req.val)
 		if req.op == opPut {
-			next[req.key] = req.val
+			pending = append(pending, pend{key: req.key, e: entryFor(req.val, base+off)})
 		} else {
-			delete(next, req.key)
+			pending = append(pending, pend{key: req.key, del: true})
 		}
+		recs = append(recs, r...)
+		off += int64(len(r) / s.bs)
 	}
 
-	nblk := int64(len(recs) / s.bs)
-	if s.head+nblk > s.regionLen {
-		// Not enough room: checkpoint the new live set into the other region.
-		if err := s.compact(next); err != nil {
-			return err
-		}
-	} else {
-		if err := s.dev.WriteBlocks(s.regionStart[s.active]+s.head, recs); err != nil {
-			return err
-		}
-		s.head += nblk
+	if s.head+off > s.regionLen {
+		// Not enough room: checkpoint the live set into the other region.
+		return s.compact(batch)
 	}
+	if err := s.dev.WriteBlocks(base, recs); err != nil {
+		return err
+	}
+	s.head += off
 
+	next := s.copyIndex()
+	for _, p := range pending {
+		if p.del {
+			delete(next, p.key)
+		} else {
+			next[p.key] = p.e
+		}
+	}
 	s.cur.store(next)
 	return nil
+}
+
+func (s *Store) copyIndex() index {
+	cur := s.cur.load()
+	next := make(index, len(cur))
+	for k, v := range cur {
+		next[k] = v
+	}
+	return next
 }
 
 // record serializes one log record padded to a whole number of blocks.
@@ -238,35 +349,73 @@ func (s *Store) record(op byte, key string, val []byte) []byte {
 	return buf
 }
 
-// compact rewrites idx as fresh put records into the inactive region, then
-// atomically switches the superblock to it. Crash-safe: the old superblock and
-// region remain valid until the single-block superblock write lands.
-func (s *Store) compact(idx index) error {
-	other := 1 - s.active
-
-	var recs []byte
-	var head int64
-	for k, v := range idx {
-		s.seq++
-		r := s.record(opPut, k, v)
-		recs = append(recs, r...)
-		head += int64(len(r) / s.bs)
-	}
-	if head > s.regionLen {
-		return ErrFull
-	}
-	if len(recs) > 0 {
-		if err := s.dev.WriteBlocks(s.regionStart[other], recs); err != nil {
-			return err
+// compact rewrites the live set (current index with batch applied) as fresh
+// records into the inactive region, then atomically switches the superblock to
+// it. Crash-safe: the old superblock and region stay valid until the single
+// (atomic) superblock block write lands. Values are streamed one at a time -
+// disk-resident ones are read from the old region as they are rewritten - so
+// compaction stays memory-bounded regardless of total value size.
+func (s *Store) compact(batch []*writeReq) error {
+	// Resolve the batch to a final value (or deletion) per key.
+	bput := make(map[string][]byte)
+	bdel := make(map[string]bool)
+	for _, req := range batch {
+		if req.op == opPut {
+			bput[req.key] = req.val
+			delete(bdel, req.key)
+		} else {
+			bdel[req.key] = true
+			delete(bput, req.key)
 		}
 	}
+
+	cur := s.cur.load()
+	live := make(map[string]bool, len(cur)+len(bput))
+	for k := range cur {
+		if !bdel[k] {
+			live[k] = true
+		}
+	}
+	for k := range bput {
+		live[k] = true
+	}
+
+	other := 1 - s.active
+	base := s.regionStart[other]
+	next := make(index, len(live))
+	var off int64
+	for k := range live {
+		val, ok := bput[k]
+		if !ok {
+			e := cur[k]
+			if e.val != nil {
+				val = e.val
+			} else if v, stale, err := s.readRecordValue(e.block, k); err != nil {
+				return err
+			} else if stale {
+				return ErrCorrupt
+			} else {
+				val = v
+			}
+		}
+		s.seq++
+		r := s.record(opPut, k, val)
+		nb := int64(len(r) / s.bs)
+		if off+nb > s.regionLen {
+			return ErrFull
+		}
+		if err := s.dev.WriteBlocks(base+off, r); err != nil {
+			return err
+		}
+		next[k] = entryFor(val, base+off)
+		off += nb
+	}
+
 	if err := s.writeSuper(other, s.gen+1); err != nil {
 		return err
 	}
-
-	s.active = other
-	s.head = head
-	s.gen++
+	s.active, s.head, s.gen = other, off, s.gen+1
+	s.cur.store(next)
 	return nil
 }
 

@@ -34,7 +34,7 @@ func (f *kvFS) Open(name string) (fs.File, error) {
 		entries, _ := f.ReadDir(name)
 		return &dirFile{info: info{name: path.Base(name), dir: true}, entries: entries}, nil
 	}
-	if v, ok := f.s.Get(name); ok {
+	if v, err := f.s.Get(name); err == nil {
 		return &dataFile{info: info{name: path.Base(name), size: int64(len(v))}, r: bytes.NewReader(v)}, nil
 	}
 	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
@@ -47,8 +47,8 @@ func (f *kvFS) Stat(name string) (fs.FileInfo, error) {
 	if name == "." || f.isDir(name) {
 		return info{name: path.Base(name), dir: true}, nil
 	}
-	if v, ok := f.s.Get(name); ok {
-		return info{name: path.Base(name), size: int64(len(v))}, nil
+	if sz, ok := f.s.Size(name); ok { // size without reading the value
+		return info{name: path.Base(name), size: sz}, nil
 	}
 	return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
 }
@@ -87,8 +87,8 @@ func (f *kvFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	for _, n := range names {
 		i := info{name: n, dir: kind[n]}
 		if !i.dir {
-			if v, ok := f.s.Get(prefix + n); ok {
-				i.size = int64(len(v))
+			if sz, ok := f.s.Size(prefix + n); ok { // size without reading the value
+				i.size = sz
 			}
 		}
 		out = append(out, i)

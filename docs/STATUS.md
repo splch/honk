@@ -22,7 +22,7 @@ distribution (`tamago-go`) is auto-built on first use into the OS cache dir.
 | **M1 IRQ + console + shell** | ✅ **complete** | honk S-mode trap vector (proper `sret`); UART RX interrupt → PLIC → ring → channel; interactive shell over the UART; S-mode exceptions print `scause`/`sepc`/`stval` and halt. |
 | **M2 process model** | ✅ **complete** | `proc` table = goroutine + `context` (cancel = kill) + capabilities; `run`/`ps`/`kill`/`crash`/`reap`/`stress` shell commands; `recover()` fault domains (a panicking process is reaped, kernel + siblings survive); race-tested (`go test -race ./kernel/proc`) and stressed under `-smp 4`. |
 | **M3 block device** | ✅ **complete** | `block.Device` interface with two backends: **NVMe-over-PCIe** (PCIe ECAM enumeration + BAR assignment, controller bring-up, admin+I/O queues, identify, PRP read/write - primary) and **virtio-blk** (virtio-mmio v2, split virtqueue - fallback). `blk` shell self-test; both verified for detection, read/write round-trip, and on-disk persistence; smoke test gates both. |
-| **M4 KV store + VFS** | ✅ **complete** | Crash-safe log-structured KV (`kernel/kv`) over `block.Device` - single-appender group commit, lock-free COW snapshot reads, double-buffered superblock, atomic-checkpoint compaction, replay-to-last-valid; exposed as `io/fs.FS` (`kernel/vfs`) overlaid on the embedded core; `ls`/`cat`/`cp`/`put`/`rm` shell. Host race-tested (incl. torn-tail + compaction), `fstest.TestFS`-validated, reboot persistence verified in QEMU. |
+| **M4 KV store + VFS** | ✅ **complete** | Crash-safe log-structured KV (`kernel/kv`) over `block.Device` - single-appender group commit, lock-free COW snapshot reads, double-buffered superblock, atomic-checkpoint compaction, replay-to-last-valid. **Hybrid value store:** small values inline in memory, larger ones disk-resident (index holds a verified pointer), so the store is not RAM-bounded. Exposed as `io/fs.FS` (`kernel/vfs`) overlaid on the embedded core; `ls`/`cat`/`cp`/`put`/`rm` shell. Host race-tested (incl. torn-tail, compaction, disk-resident round-trip), `fstest.TestFS`-validated, reboot persistence verified in QEMU. |
 
 **Phase A complete; Phase B (storage) underway.** Next: M5 immutable core (verity + A/B).
 
@@ -220,6 +220,16 @@ mapping the design onto Go primitives (HONK.md §1):
   other of two log regions, then a *double-buffered* superblock is switched with
   a single (atomic) block write. A crash mid-compaction leaves the old
   superblock and region intact.
+
+**Values are disk-resident above a threshold.** The index holds small values
+inline (lock-free, no I/O) but spills larger values to the log and keeps only a
+pointer, so steady-state memory is bounded by keys + small values, not total
+value bytes. `Get` reads a spilled value from its record and *verifies*
+magic+CRC+key before returning, so a location recycled by two compactions is
+detected and the read retried (correct, not just probable). `Has`/`Size` answer
+from the index with no I/O; compaction streams disk-resident values one at a
+time as it rewrites them. The on-disk format is unchanged - residency is purely
+an in-memory index decision.
 
 `kernel/vfs` exposes the store as a nested `io/fs.FS` (directories synthesized
 from slash-separated keys) and a union `Overlay`: the writable kv FS over the
