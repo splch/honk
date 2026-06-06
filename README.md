@@ -15,7 +15,7 @@ honk boots as an **HS-mode payload under OpenSBI** on the QEMU `virt` machine.
 make run              # build + boot under QEMU (Ctrl-A x to quit)
 make test             # host race tests of every pure-Go package
 make phase-a          # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
-make smoke            # build + boot + assert M0-M6 output (CI gate)
+make smoke            # build + boot + assert M0-M7 output (CI gate)
 ```
 
 Needs a host Go toolchain and `qemu-system-riscv64`. The TamaGo Go distribution
@@ -28,6 +28,7 @@ port to honk's `:80`).
 ```
 kernel/        the HS-mode Go program (the OS): boot, SMP demo, shell
 kernel/net.go  networking: virtio-net + gVisor (go-net) -> stdlib net + net/http
+kernel/wasm.go untrusted-code tier: wazero (WASI preview 1), capability-gated
 kernel/proc/   process model: goroutine + context + capabilities (host-tested)
 board/virt/ring/  SPSC byte ring for the IRQ->channel console path (host-tested)
 block/         block-device interface + in-memory device (host-tested)
@@ -47,8 +48,11 @@ process model (goroutine + context + capabilities, `recover()` fault domains), a
 persistent block device (NVMe-over-PCIe + virtio-blk fallback), a crash-safe
 log-structured kv store, an immutable, Ed25519-signed + Merkle-verified core
 image (A/B slots with fallback, anti-rollback, stateless reset) served read-only
-under the writable kv overlay, and **networking** - honk's own virtio-net driver
-+ the gVisor TCP/IP stack (`go-net`) lighting up the stdlib `net` package, with a
-`net/http` server on `:80`. `make run` drops you at a `honk>` prompt; try `help`,
-`ls`, `cat motd`, `net`, `reset --confirm`, and `curl http://localhost:8080/`.
-Next: M7 WASM/WASI tier. See `docs/STATUS.md`.
+under the writable kv overlay, **networking** - honk's own virtio-net driver +
+the gVisor TCP/IP stack (`go-net`) lighting up the stdlib `net` package, with a
+`net/http` server on `:80` - and a **WASM/WASI tier** (wazero interpreter) that
+runs untrusted, any-toolchain modules as capability-gated, killable honk
+processes. `make run` drops you at a `honk>` prompt; try `help`, `ls`, `cat
+motd`, `net`, `wasm hello.wasm`, `reset --confirm`, and `curl
+http://localhost:8080/`. Phase C (the everyday networked OS) is complete; next:
+M8 host files. See `docs/STATUS.md`.

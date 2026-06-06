@@ -381,6 +381,20 @@ is front-loaded; the OS logic on top of it is small because it is Go.
    granting); epoch/`context` termination. `run app.wasm`. (Path to WASI Preview
    2 / the Component Model as wazero matures - a module's WIT world becomes its
    manifest.)
+   - *Status:* **COMPLETE + verified.** `kernel/wasm.go` embeds wazero
+     (interpreter mode) + WASI Preview 1. A WASM module is a honk **process**
+     (`runWASM` -> the M2 table): it runs as a goroutine under a `context`, and
+     the runtime's `WithCloseOnContextDone` makes `kill` terminate even a
+     tight-looping module (verified: `wasm loop.wasm` + `kill`). **Capability
+     discipline:** honk *implements* the WASI host funcs once but *grants*
+     nothing by default - console (stdout/stderr) and filesystem (read) are
+     passed per module via `ModuleConfig` from the process `Caps`. Two
+     hand-encoded samples ship in the verified core (`hello.wasm`, `loop.wasm`),
+     validated under wazero on the host before commit; shell `wasm <file>`.
+     QEMU-verified (`honk from wasm`) and smoke-gated. A compile/link **spike
+     retired the #1 risk first**: wazero's interpreter builds on `GOOS=tamago
+     GOARCH=riscv64` (its compiler/JIT backend is gated off for unknown GOOS).
+     **Phase C complete.** See `docs/STATUS.md`.
 9. **M8 Host files.** 9p-over-virtio as an `fs.FS` (the virtio-fs device backend
    lands in Phase E).
 
@@ -433,7 +447,7 @@ is front-loaded; the OS logic on top of it is small because it is Go.
 | **GC pauses / CPU tax** in a kernel | Biscuit measured <=13% CPU and ~115us pauses - acceptable. Use `debug.SetMemoryLimit` (kotama already does), size the heap with headroom, keep hot driver paths allocation-light. |
 | **No async preemption of tight loops** (TamaGo, like js/wasm) | Trusted code must yield (it is first-party); WASM modules run under epoch/`context` termination; per-hart timer ISR is the watchdog. |
 | **Trusted tier relies on memory safety** | Acceptable for first-party signed code (the unikernel trust model); anything untrusted goes to the WASM or VM tier. No `unsafe` in app code; bugs panic (Biscuit). |
-| **wazero is interpreter-only on riscv64** (no JIT) and unproven on `GOOS=tamago` | Interpreter mode is platform-agnostic and OS-free by design; validate with a spike before M7. Positioning, not just risk: keep WASM for app/glue/service workloads and route compute-heavy code to a VM or compile it in. |
+| **wazero is interpreter-only on riscv64** (no JIT) and unproven on `GOOS=tamago` | **Retired (M7):** a compile/link spike confirmed wazero's interpreter builds *and runs* on `GOOS=tamago GOARCH=riscv64` (its compiler backend is gated off for unknown GOOS, the arch asm excluded on riscv64). Positioning, not just risk: keep WASM for app/glue/service workloads and route compute-heavy code to a VM or compile it in. |
 | **No bare-metal pure-Go NVMe/PCIe/virtio-blk/gpu** | Write them on the `kvm/virtio` framework; Go interfaces + channel-driven IRQs make them cleaner than C (Biscuit's AHCI/NIC are the model). |
 | **First pure-Go RISC-V VMM** (prior art all Rust) | Phase E research; the only place honk writes paging; reuse design of salus/hypocaust-2; device backends on `kvm/virtio`. |
 | **Forking `tamago-go`** | Keep it to the SMP `M`-bring-up hook; rebase each release; pin base tag + patch set for reproducible builds; gate bumps on scheduler/IRQ stress tests; upstream the hook so the fork goes to zero. |

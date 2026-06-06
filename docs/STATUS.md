@@ -8,7 +8,7 @@ Living record of what is implemented and verified, and what is next. See
 ```sh
 make run        # build + boot under QEMU virt (Ctrl-A x to quit)
 make test       # host race tests of every pure-Go package
-make smoke      # build + boot + assert M0-M6 output (CI gate)
+make smoke      # build + boot + assert M0-M7 output (CI gate)
 make phase-a    # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
 make vet        # go vet under the tamago toolchain
 ```
@@ -58,7 +58,9 @@ M0-M5 smoke test. The split is by where the authority for correctness lives:
 
 | **M6 networking** | ✅ **complete** | **virtio-net + the gVisor TCP/IP stack**, lighting up the stdlib `net` package. honk's own virtio-net driver (`board/virt/virtionet.go`, on the shared virtio-mmio transport `virtio.go`) is a `go-net` `NetworkDevice`; `gnet.NewGVisorStack` is the stack; `net.SocketFunc = stack.Socket` makes `net.Dial`/`Listen` - and thus `net/http`, `crypto/tls`, etc. - work unchanged. honk serves an HTTP status page on `:80`. QEMU-verified end to end: a host `curl` through SLIRP `hostfwd` reaches honk's `net/http` server (driver -> gVisor -> stdlib `net.Listener`), gated by the smoke test. The gVisor reuse was de-risked by a compile/link spike (gVisor links on `GOOS=tamago GOARCH=riscv64`); `go-net/virtio` is amd64-only, so honk supplies its own driver. |
 
-**Phase A complete; Phase B (storage) complete; Phase C started (M6 complete).** Next: M7 WASM/WASI tier (wazero).
+| **M7 WASM/WASI tier** | ✅ **complete** | **wazero interpreter + WASI Preview 1** - the untrusted/dynamic/any-toolchain isolation tier (`kernel/wasm.go`). A WASM module is a honk **process**: it runs as a goroutine under a `context`, so `kill` (context cancel) + wazero's `WithCloseOnContextDone` terminate even a tight-looping module. **Capability-gated:** honk *implements* the WASI host funcs once but *grants* nothing by default - console (stdout/stderr) and filesystem (read access to the overlay) are passed per module via `ModuleConfig` from the process's `Caps`. Two hand-encoded sample modules ship in the verified core (`hello.wasm`, `loop.wasm`); shell `wasm <file>`. QEMU-verified (run a WASI module -> `honk from wasm`; kill a runaway loop) and smoke-gated. Risk retired by a compile/link spike first: wazero's interpreter builds on `GOOS=tamago GOARCH=riscv64` (the compiler/JIT backend is correctly disabled). |
+
+**Phase A + B complete; Phase C (the everyday networked OS) complete: M6 networking + M7 WASM/WASI.** Next: M8 host files (9p-over-virtio as an `fs.FS`).
 
 ## What boots today (M0+M1)
 
@@ -388,8 +390,42 @@ image substantially (~3 MB -> ~11 MB) - the cost of the stdlib + gVisor reuse
 `/pprof`, `/statsviz`, and a `crypto/mlkem` demo are the obvious next additions
 on this foundation.
 
-## Next: M7
+## WASM/WASI tier (M7) - how it works
 
-WASM/WASI tier: embed wazero, run WASI Preview 1 modules from any toolchain,
-route every WASI call through a capability check (implementing != granting),
-epoch/`context` termination. `run app.wasm`.
+`kernel/wasm.go` embeds **wazero** (interpreter mode - no JIT on riscv64; the
+interpreter is OS-agnostic) as honk's tier-2 sandbox for untrusted, dynamic,
+any-toolchain code (HONK.md §1). A compile/link spike retired the milestone's #1
+risk first: wazero builds on `GOOS=tamago GOARCH=riscv64` (its compiler backend
+is gated off for unknown GOOS, so the interpreter is used; the arch-specific
+compiler asm is excluded on riscv64).
+
+- **A WASM module is a honk process.** `runWASM` spawns it via the M2 process
+  table (goroutine + `context`). The runtime is built with
+  `WithCloseOnContextDone(true)` and the module runs under the process context,
+  so `kill <pid>` (context cancel) aborts even an uncooperative tight loop -
+  which is exactly why uncooperative code belongs in this tier, not as a trusted
+  goroutine. Verified: `wasm loop.wasm` then `kill` reaps it `killed`.
+- **Capability discipline (implementing != granting).** honk instantiates the
+  WASI Preview 1 host module *once* on the shared runtime, but a module is
+  *granted* nothing by default: its `ModuleConfig` is built from the process's
+  `Caps` - `CapConsole` grants stdout/stderr (routed to honk's console),
+  `CapBlock` grants read access to the overlay filesystem (`WithFS(root)`). A
+  module with no caps can compute but cannot observably touch the outside.
+- **Proof.** Two tiny hand-encoded modules ship in the verified core image:
+  `hello.wasm` (calls `fd_write` -> `honk from wasm`) and `loop.wasm` (an
+  infinite loop, for the kill demo). Both were validated under wazero on the
+  host before being committed. Shell: `wasm <file.wasm>`. The smoke test runs
+  `wasm hello.wasm` and asserts the output.
+
+**Honest scope.** Interpreter-only (no JIT on riscv64), so WASM suits
+app/glue/service workloads; compute-heavy code should be compiled in or pushed
+to a VM (Phase E). Capability *grants* are coarse (console / fs read); a
+per-call capability check and a richer manifest are future work, as is the path
+to WASI Preview 2 / the Component Model (a module's WIT world becomes its
+manifest) as wazero matures.
+
+## Next: M8
+
+Host files: 9p-over-virtio exposed as an `io/fs.FS` and unioned into the overlay
+(the virtio-fs device backend lands in Phase E). That completes Phase C's file
+story.

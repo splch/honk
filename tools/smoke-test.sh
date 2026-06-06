@@ -60,10 +60,10 @@ want() {
 nvme=(-drive "file=$NVME,if=none,id=nvm,format=raw" -device nvme,serial=honk,drive=nvm)
 
 # Run A: NVMe primary; full M0-M5 exercise; writes land in the kv store.
-boot $'\nhelp\nblk\ncat os-release\ncp motd readme\nput config/host honkbox\nls\nrun\ncrash\nstress 16\nexit\n' \
+boot $'\nhelp\nblk\ncat os-release\ncp motd readme\nput config/host honkbox\nls\nrun\ncrash\nstress 16\nwasm hello.wasm\nexit\n' \
 	"$A" "${nvme[@]}"
 cat "$A"
-want "$A" "NVMe/M0-M5" <<'EOF'
+want "$A" "NVMe/M0-M7" <<'EOF'
 honk: HS-mode boot ok
 SMP OK - goroutines ran on
 storage = NVMe
@@ -75,6 +75,8 @@ put: wrote config/host
 readme
 kernel survives
 ran across
+wasm runtime ready
+honk from wasm
 honk: shutting down
 EOF
 

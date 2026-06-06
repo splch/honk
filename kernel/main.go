@@ -52,6 +52,10 @@ func main() {
 	// stdlib net package, and an HTTP status server. No-op without a NIC.
 	InitNet()
 
+	// Embed the WASM/WASI tier (M7): a wazero interpreter sandbox for untrusted,
+	// dynamic, any-toolchain code. WASM modules run as honk processes.
+	InitWASM()
+
 	// Prove the scheduler actually runs goroutines across multiple harts.
 	harts := smpDemo(nharts)
 	if len(harts) > 1 {
