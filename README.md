@@ -30,19 +30,20 @@ kernel/        the HS-mode Go program (the OS): boot, SMP demo, shell
 kernel/net.go  networking: virtio-net + gVisor (go-net) -> stdlib net + net/http
 kernel/wasm.go untrusted-code tier: wazero (WASI preview 1), capability-gated
 kernel/proc/   process model: goroutine + context + capabilities (host-tested)
+kernel/p9/     read-only 9P2000.L client for host files -> io/fs.FS (host-tested)
 board/virt/ring/  SPSC byte ring for the IRQ->channel console path (host-tested)
 block/         block-device interface + in-memory device (host-tested)
 kernel/kv/     crash-safe log-structured key/value store, disk-resident (host-tested)
 kernel/vfs/    io/fs.FS over the kv store + overlay on the verified core (host-tested)
 kernel/image/  signed, Merkle-tree'd immutable core image; A/B + anti-rollback (host-tested)
-board/virt/    QEMU virt board: startup, SMP, traps, PLIC, UART, PCIe/NVMe, virtio-blk + virtio-net, SBI
+board/virt/    QEMU virt board: startup, SMP, traps, PLIC, UART, PCIe/NVMe, virtio-blk/net/9p, SBI
 tools/         build.sh, vet.sh, run-qemu.sh, smoke-test.sh, phase-a-test.sh, mkboot + mkimage
 HONK.md        full design and roadmap
 docs/STATUS.md what works today and what's next
 GO.md RV64.md OS.md   language / hardware / domain references
 ```
 
-Status: **Phase A + B complete; Phase C started (M0-M6)** - HS-mode boot under
+Status: **Phase A + B + C complete (M0-M8)** - HS-mode boot under
 OpenSBI, SMP across all harts, an interrupt-driven UART console + shell, a
 process model (goroutine + context + capabilities, `recover()` fault domains), a
 persistent block device (NVMe-over-PCIe + virtio-blk fallback), a crash-safe
@@ -50,9 +51,11 @@ log-structured kv store, an immutable, Ed25519-signed + Merkle-verified core
 image (A/B slots with fallback, anti-rollback, stateless reset) served read-only
 under the writable kv overlay, **networking** - honk's own virtio-net driver +
 the gVisor TCP/IP stack (`go-net`) lighting up the stdlib `net` package, with a
-`net/http` server on `:80` - and a **WASM/WASI tier** (wazero interpreter) that
+`net/http` server on `:80` - a **WASM/WASI tier** (wazero interpreter) that
 runs untrusted, any-toolchain modules as capability-gated, killable honk
-processes. `make run` drops you at a `honk>` prompt; try `help`, `ls`, `cat
-motd`, `net`, `wasm hello.wasm`, `reset --confirm`, and `curl
-http://localhost:8080/`. Phase C (the everyday networked OS) is complete; next:
-M8 host files. See `docs/STATUS.md`.
+processes, and **host files** - a hand-rolled read-only 9P2000.L client over
+honk's own virtio-9p driver, mounting a QEMU-shared host directory as an
+`io/fs.FS` unioned into the overlay. `make run` drops you at a `honk>` prompt;
+try `help`, `mount`, `ls`, `cat motd`, `net`, `wasm hello.wasm`, `reset
+--confirm`, and `curl http://localhost:8080/`. Phase C (the everyday networked
+OS) is complete; next: Phase D - M9 framebuffer. See `docs/STATUS.md`.

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Build honk and boot it under QEMU, asserting M0-M5 behavior across both block
+# Build honk and boot it under QEMU, asserting M0-M8 behavior across both block
 # backends (NVMe primary, virtio-blk fallback): SMP + console + process model,
 # block I/O, the kv store + overlay filesystem with reboot persistence, the
-# immutable signed core image (verification, A/B selection + fallback), and the
-# stateless reset. Exits non-zero on any missing line or a boot hang.
+# immutable signed core image (verification, A/B selection + fallback), the
+# stateless reset, networking (virtio-net + gVisor + net/http), the WASM/WASI
+# tier, and host files over 9p. Exits non-zero on any missing line or a hang.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,7 +14,7 @@ SMP="${SMP:-4}"
 # Host race tests of the pure-Go stack (M1 console ring, M2 proc, M4 kv + vfs,
 # M5 image verity).
 echo "== go test -race ./kernel/... ./board/virt/ring ./block =="
-go test -race -count=1 ./kernel/proc/ ./board/virt/ring/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./block/ ||
+go test -race -count=1 ./kernel/proc/ ./board/virt/ring/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./kernel/p9/ ./block/ ||
 	{ echo "SMOKE FAIL: host race tests" >&2; exit 1; }
 
 tools/build.sh >/dev/null
@@ -25,7 +26,8 @@ env -u GOOS -u GOARCH -u GOOSPKG go run ./tools/mkimage -version 1 kernel/core "
 
 NVME="$(mktemp)" RNVME="$(mktemp)" VB="$(mktemp)" AB="$(mktemp)"
 A="$(mktemp)" P="$(mktemp)" B="$(mktemp)" R="$(mktemp)" S1="$(mktemp)" S2="$(mktemp)" N="$(mktemp)"
-trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$N" "$AIMG" "$BIMG"' EXIT
+H="$(mktemp)" HNVME="$(mktemp)" HSHARE="$(mktemp -d)"
+trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$N" "$AIMG" "$BIMG" "$H" "$HNVME"; rm -rf "$HSHARE"' EXIT
 dd if=/dev/zero of="$NVME" bs=1048576 count=16 2>/dev/null
 dd if=/dev/zero of="$VB" bs=1048576 count=16 2>/dev/null
 
@@ -85,6 +87,25 @@ boot $'\ncat config/host\ncat readme\nexit\n' "$P" "${nvme[@]}"
 want "$P" "persistence" <<'EOF'
 honkbox
 Welcome to honk
+EOF
+
+# Run H: host files over 9p (M8). Share a host directory with a top-level and a
+# nested file; honk mounts it as an io/fs.FS (its own virtio-9p driver + 9P2000.L
+# client) and reads both through the overlay, which merges the host share with
+# the embedded core and the writable kv layer. `mount` reports the layers.
+echo "hello from the host filesystem" >"$HSHARE/hostfile.txt"
+mkdir -p "$HSHARE/hostdir"
+echo "nested host content" >"$HSHARE/hostdir/inner.txt"
+dd if=/dev/zero of="$HNVME" bs=1048576 count=16 2>/dev/null
+boot $'\nmount\nls\ncat hostfile.txt\ncat hostdir/inner.txt\nexit\n' "$H" \
+	-drive "file=$HNVME,if=none,id=nvm,format=raw" -device nvme,serial=honk,drive=nvm \
+	-fsdev local,id=hostdev,path="$HSHARE",security_model=none \
+	-device virtio-9p-device,fsdev=hostdev,mount_tag=host
+want "$H" "9p host files" <<'EOF'
+host share mounted (9p, tag "host")
+hostfile.txt
+hello from the host filesystem
+nested host content
 EOF
 
 # Run B: virtio-blk fallback (no NVMe attached).

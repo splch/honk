@@ -162,8 +162,11 @@ ordinary Go: capabilities are just interface values you do or do not pass.
   of checksummed records with atomic checkpoint switching, replaying to the last
   valid record and discarding a torn tail. Implements `io/fs.FS`; virtio-blk is
   the fallback block transport.
-- **Host files**: honk *serves* its FS to guests via a **virtio-fs device
-  backend** (FUSE-over-virtio); 9p-over-virtio (`Harvey-OS/ninep`) lands first.
+- **Host files**: honk is a **9p client** - its own read-only 9P2000.L client
+  (`kernel/p9`) over its virtio-mmio transport mounts a QEMU-shared host
+  directory as an `io/fs.FS`, unioned into the overlay (M8). The reverse - honk
+  *serving* its FS to guests via a **virtio-fs device backend** (FUSE-over-virtio)
+  - lands in Phase E.
 
 ---
 
@@ -179,7 +182,7 @@ ordinary Go: capabilities are just interface values you do or do not pass.
 | Untrusted-code WASM sandbox | `wazero` (interpreter mode) |
 | TLS/HTTP/SSH/DNS/crypto/post-quantum KEM/JSON/image | Go stdlib + `golang.org/x/{crypto,image}` |
 | Shell/terminal | `tamago-example/shell` |
-| 9P host filesystem | `Harvey-OS/ninep` |
+| 9P host filesystem | `Harvey-OS/ninep` (read; its client wants a streaming `net.Conn`, not a virtqueue, so honk's read-only 9P2000.L client `kernel/p9` is its own) |
 | Driver / VMM hardware references (read, don't import) | Biscuit (AHCI/NIC in Go), go-nvme, salus/hypocaust-2 |
 
 ### Write (only where hardware is intrinsic)
@@ -197,6 +200,7 @@ ordinary Go: capabilities are just interface values you do or do not pass.
 | Immutable image: Merkle verity + A/B + anchored-boot iface (ed25519 / OTP fuses) + anti-rollback | `kernel/image` + `tools/mkimage` | 750 | medium |
 | WASI Preview 1 host (every call capability-gated) + module manifests | `kernel/wasm` | 500 | medium |
 | Net glue (go-net + `net.SocketFunc`) | `kernel/net` | 200 | easy |
+| Read-only **9P2000.L client** -> `io/fs.FS` + virtio-9p transport | `kernel/p9` + `board/virt/virtio9p` | 600 | medium |
 | virtio-gpu framebuffer -> `draw.Image` | `kernel/virtio/gpu` | 500 | hard |
 | virtio-input (evdev key/rel/abs events) -> input channel | `kernel/virtio/input` | 200 | easy-medium |
 | Minimal GUI toolkit over `image/draw` + font | `user/gui` | 800 | medium |
@@ -397,6 +401,21 @@ is front-loaded; the OS logic on top of it is small because it is Go.
      **Phase C complete.** See `docs/STATUS.md`.
 9. **M8 Host files.** 9p-over-virtio as an `fs.FS` (the virtio-fs device backend
    lands in Phase E).
+   - *Status:* **COMPLETE + verified.** honk's own virtio-9p driver
+     (`board/virt/virtio9p.go`, on the shared virtio-mmio v2 transport) carries
+     whole 9P messages for a hand-rolled, read-only **9P2000.L client**
+     (`kernel/p9`) that presents QEMU's host-shared directory as a standard
+     `io/fs.FS` and is unioned into the overlay (writable kv → host share →
+     verified core). The client owns the wire format + fid lifecycle behind a
+     two-method `Transport` and `Mount() (fs.FS, error)` - a deep module. The
+     stated reuse (`Harvey-OS/ninep`) is built around a streaming `net.Conn`,
+     not a message-framed virtqueue (the same fit problem that made honk write
+     its own virtio-net driver), so honk hand-rolls the small read subset over
+     its existing transport. Pure Go: `go test -race ./kernel/p9` runs against an
+     in-process 9P server incl. `fstest.TestFS`; QEMU-verified end to end
+     (`-fsdev local` + `virtio-9p-device`) and smoke-gated. Shell `mount` lists
+     the layers; `ls`/`cat` read host files through the overlay. **Phase C
+     complete.** See `docs/STATUS.md`.
 
 **Phase D - display/GUI**
 10. **M9 Framebuffer.** virtio-gpu -> `draw.Image`; compositor; draw a test

@@ -8,7 +8,7 @@ Living record of what is implemented and verified, and what is next. See
 ```sh
 make run        # build + boot under QEMU virt (Ctrl-A x to quit)
 make test       # host race tests of every pure-Go package
-make smoke      # build + boot + assert M0-M7 output (CI gate)
+make smoke      # build + boot + assert M0-M8 output (CI gate)
 make phase-a    # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
 make vet        # go vet under the tamago toolchain
 ```
@@ -60,7 +60,9 @@ M0-M5 smoke test. The split is by where the authority for correctness lives:
 
 | **M7 WASM/WASI tier** | ✅ **complete** | **wazero interpreter + WASI Preview 1** - the untrusted/dynamic/any-toolchain isolation tier (`kernel/wasm.go`). A WASM module is a honk **process**: it runs as a goroutine under a `context`, so `kill` (context cancel) + wazero's `WithCloseOnContextDone` terminate even a tight-looping module. **Capability-gated:** honk *implements* the WASI host funcs once but *grants* nothing by default - console (stdout/stderr) and filesystem (read access to the overlay) are passed per module via `ModuleConfig` from the process's `Caps`. Two hand-encoded sample modules ship in the verified core (`hello.wasm`, `loop.wasm`); shell `wasm <file>`. QEMU-verified (run a WASI module -> `honk from wasm`; kill a runaway loop) and smoke-gated. Risk retired by a compile/link spike first: wazero's interpreter builds on `GOOS=tamago GOARCH=riscv64` (the compiler/JIT backend is correctly disabled). |
 
-**Phase A + B complete; Phase C (the everyday networked OS) complete: M6 networking + M7 WASM/WASI.** Next: M8 host files (9p-over-virtio as an `fs.FS`).
+| **M8 host files** | ✅ **complete** | **9p-over-virtio as an `io/fs.FS`.** honk's own virtio-9p driver (`board/virt/virtio9p.go`, on the shared virtio-mmio transport) carries whole 9P messages for a hand-rolled read-only **9P2000.L client** (`kernel/p9`), which presents the host-shared directory as a standard `io/fs.FS` and is unioned into the overlay (writable kv → host share → verified core). `mount` reports the layers; `ls`/`cat` read host files through the same overlay as the core and kv. The 9P client is pure Go, host race-tested against an in-process 9P server incl. `fstest.TestFS`; QEMU-verified end to end (`-fsdev local` + `virtio-9p-device`) and smoke-gated. |
+
+**Phase A + B + C complete (the everyday networked OS): M6 networking + M7 WASM/WASI + M8 host files.** Next: Phase D - M9 framebuffer (virtio-gpu).
 
 ## What boots today (M0+M1)
 
@@ -424,8 +426,48 @@ per-call capability check and a richer manifest are future work, as is the path
 to WASI Preview 2 / the Component Model (a module's WIT world becomes its
 manifest) as wazero matures.
 
-## Next: M8
+## Host files (M8) - how it works
 
-Host files: 9p-over-virtio exposed as an `io/fs.FS` and unioned into the overlay
-(the virtio-fs device backend lands in Phase E). That completes Phase C's file
-story.
+QEMU exports a host directory to the guest as a **virtio-9p** device
+(`-fsdev local` + `-device virtio-9p-device,mount_tag=host`). honk mounts it and
+unions it into the overlay, so host files compose with the embedded core and the
+writable kv store through one `io/fs.FS` (HONK.md §1) - no bespoke API.
+
+- **Transport (`board/virt/virtio9p.go`).** A split-virtqueue virtio-9p device on
+  honk's shared virtio-mmio v2 transport (`virtio.go`). It owns *no* 9P protocol
+  knowledge: it exposes one operation - send a complete 9P T-message, get the
+  R-message reply (`RoundTrip`) - plus the device's mount tag. Each exchange is a
+  2-descriptor chain (request device-readable, reply device-writable) published
+  and polled to completion, exactly like honk's virtio-blk path. msize is 16 KiB
+  (above QEMU's small-msize note).
+- **Client (`kernel/p9`).** A hand-rolled **read-only 9P2000.L client** that owns
+  the wire format and fid lifecycle behind a tiny surface: a `Transport`
+  interface and `Mount(Transport) (fs.FS, error)`. It speaks the read subset -
+  version/attach/walk/open/read/readdir/getattr/clunk - allocates a fresh fid per
+  open (reused via a free list) and clunks on Close, batches deep walks within
+  the 16-element Twalk limit, decodes Treaddir lazily, and maps an Rlerror ENOENT
+  to `fs.ErrNotExist` so the overlay falls through. The reuse plan named
+  `Harvey-OS/ninep`, but its client is built around a streaming `net.Conn`, not a
+  message-framed virtqueue - the same fit problem that made honk write its own
+  virtio-net driver - so honk hand-rolls the small read-only subset over its
+  existing transport instead.
+- **Composition (`kernel/fsmount.go`).** `p9.Mount` returns an `fs.FS` that is
+  layered into the overlay between the writable kv store (top) and the verified
+  core (bottom): `Overlay(kv, Overlay(host, core))`. With no 9p device it is a
+  no-op and the root is unchanged. The shell's `mount` command lists the layers.
+- **Proof.** `kernel/p9` is pure Go: `go test -race ./kernel/p9` runs the client
+  against an in-process 9P2000.L server (a test loopback `Transport`), including
+  `fstest.TestFS` and a large-file test that forces multi-`Tread` reassembly. The
+  smoke test boots honk with a host share holding a top-level and a nested file
+  and asserts both read back through the overlay; `make run` shares `./share`.
+
+**Honest scope.** Read-only (no create/write/remove on the host share - writes
+still go to the kv layer), polled (no IRQ), one in-flight exchange (serialized),
+and no caching or attribute timeouts (every `ls` entry's size costs a `Tgetattr`).
+This is the proven 9p interim; the virtio-fs device *backend* (honk serving its
+FS to guest VMs) lands in Phase E. **Phase C complete.**
+
+## Next: M9
+
+Phase D - display/GUI. M9 framebuffer: a virtio-gpu driver to a `draw.Image` +
+a compositor, drawing a test pattern (output first, before input).

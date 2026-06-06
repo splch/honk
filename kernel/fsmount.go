@@ -21,6 +21,7 @@ import (
 	"honk/board/virt"
 	"honk/kernel/image"
 	"honk/kernel/kv"
+	"honk/kernel/p9"
 	"honk/kernel/vfs"
 )
 
@@ -34,6 +35,7 @@ var (
 	store    *kv.Store // persistent writable layer (nil if no block device)
 	root     fs.FS     // the mounted filesystem (overlay, or core-only)
 	bootCore string    // which image booted, for the banner (e.g. "slot A v2")
+	hostTag  string    // mount tag of the 9p host share, "" if none
 )
 
 // minKVBlocks is the smallest kv region worth carving out behind the image
@@ -71,11 +73,21 @@ func mountFS() {
 	bootCore = fmt.Sprintf("%s v%d", coreSource(idx), img.SecVersion)
 	fmt.Printf("honk: core verified - %s\n", bootCore)
 
-	core := vfs.FilesFS(img.Files())
+	// Compose the root bottom-up (HONK.md §1: io/fs.FS composition): the
+	// verified core, the host share (9p) layered over it if present, and the
+	// writable kv store on top. Each layer shadows the ones below it.
+	root = vfs.FilesFS(img.Files())
+	if dev := virt.ProbeP9(); dev != nil {
+		if hostFS, err := p9.Mount(dev); err != nil {
+			fmt.Printf("honk: host share unavailable: %v\n", err)
+		} else {
+			root = vfs.Overlay(hostFS, root)
+			hostTag = dev.Tag()
+			fmt.Printf("honk: host share mounted (9p, tag %q)\n", hostTag)
+		}
+	}
 	if store != nil {
-		root = vfs.Overlay(vfs.KVFS(store), core)
-	} else {
-		root = core
+		root = vfs.Overlay(vfs.KVFS(store), root)
 	}
 }
 

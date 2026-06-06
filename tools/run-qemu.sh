@@ -7,9 +7,11 @@
 #   MEM   QEMU RAM size   (default 512M; any size works - sized from the DTB)
 #   SMP   number of harts (default 4)
 #   HTTP  host port forwarded to honk's :80 httpd (default 8080)
+#   SHARE host directory shared into honk over 9p (default ./share)
 #
 # Quit an interactive session with Ctrl-A then x.
-# With the defaults, `curl http://localhost:8080/` reaches honk's HTTP server.
+# With the defaults, `curl http://localhost:8080/` reaches honk's HTTP server,
+# and the files under ./share appear inside honk (try `mount`, `ls`, `cat`).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -22,6 +24,12 @@ NVME="${NVME:-nvme.img}"
 DISK="${DISK:-disk.img}"
 [ -f "$NVME" ] || dd if=/dev/zero of="$NVME" bs=1048576 count=16 2>/dev/null
 [ -f "$DISK" ] || dd if=/dev/zero of="$DISK" bs=1048576 count=16 2>/dev/null
+
+# Host file share (9p): honk mounts this directory read-only at boot.
+SHARE="${SHARE:-share}"
+mkdir -p "$SHARE"
+[ -e "$SHARE/README.host" ] ||
+	echo "This file lives on the host, shared into honk over 9p (mount tag 'host')." >"$SHARE/README.host"
 
 exec qemu-system-riscv64 \
 	-machine virt \
@@ -39,4 +47,6 @@ exec qemu-system-riscv64 \
 	-drive file="$DISK",if=none,id=blk0,format=raw \
 	-device virtio-blk-device,drive=blk0 \
 	-netdev "user,id=n0,hostfwd=tcp::${HTTP:-8080}-:80" \
-	-device virtio-net-device,netdev=n0
+	-device virtio-net-device,netdev=n0 \
+	-fsdev local,id=hostdev,path="$SHARE",security_model=none \
+	-device virtio-9p-device,fsdev=hostdev,mount_tag=host

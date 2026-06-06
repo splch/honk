@@ -9,3 +9,6 @@
 /data.img
 /disk.img
 /nvme.img
+
+# local host share mounted into honk over 9p by `make run`
+/share/

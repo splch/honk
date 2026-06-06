@@ -62,7 +62,7 @@ func exec(line string) {
 		fmt.Println("  help  harts  uptime  mem  echo <text>")
 		fmt.Println("  run [name]   ps   kill <pid>   crash   reap   stress [n]")
 		fmt.Println("  ls [dir]   cat <file>   cp <src> <dst>   put <key> <text>   rm <file>")
-		fmt.Println("  blk   net   wasm <file.wasm>   reset --confirm   fault  exit")
+		fmt.Println("  blk   net   mount   wasm <file.wasm>   reset --confirm   fault  exit")
 	case "harts":
 		fmt.Printf("harts: %d online  GOMAXPROCS=%d  this=hart %d\n",
 			virt.NumHarts(), runtime.GOMAXPROCS(-1), virt.CurrentHart())
@@ -115,6 +115,8 @@ func exec(line string) {
 		blk()
 	case "net":
 		netcmd()
+	case "mount":
+		mounts()
 	case "wasm":
 		wasmcmd(fields)
 	case "ls":
@@ -172,6 +174,18 @@ func blk() {
 	} else {
 		fmt.Println("blk: read/write self-test MISMATCH")
 	}
+}
+
+// mounts reports the filesystem layers that compose the overlay root, top
+// (shadowing) to bottom.
+func mounts() {
+	if store != nil {
+		fmt.Println("  kv     writable   (shadows the layers below)")
+	}
+	if hostTag != "" {
+		fmt.Printf("  host   read-only  9p tag %q\n", hostTag)
+	}
+	fmt.Printf("  core   read-only  %s\n", bootCore)
 }
 
 // ls lists a directory in the overlay filesystem.
