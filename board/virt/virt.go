@@ -77,6 +77,12 @@ func idle(until int64) {
 
 // Shutdown powers off the machine via the SBI System Reset extension, which on
 // QEMU virt cleanly exits the emulator. It is global: all harts stop.
+//
+// It is //go:nosplit so the fatal trap path (handleFault, which runs on the
+// per-hart trap stack with g pointing at the interrupted goroutine) can call it
+// without risking a spurious morestack against a mismatched stack guard.
+//
+//go:nosplit
 func Shutdown() {
 	sbiCall(sbiExtSRST, 0, 0, 0, 0) // type 0 = shutdown, reason 0 = none
 	for {

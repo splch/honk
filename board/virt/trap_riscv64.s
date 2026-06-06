@@ -15,9 +15,15 @@
 //	scause < 0 (bit 63 set) => interrupt: service it and sret.
 //	scause >= 0             => exception: fatal (handleFault never returns).
 //
-// We save only the integer caller-saved registers and call handleIRQ, which is
-// nosplit and FP-free, so the interrupted goroutine's callee-saved and FP state
-// are preserved untouched.
+// Go's riscv64 ABIInternal has NO callee-saved general-purpose registers: the
+// only registers a called Go function preserves are the special ones (SP, GP,
+// TP, and g=X27). Everything else - RA, T0-T6, A0-A7, AND S0-S10 (which the Go
+// ABI uses as argument/scratch registers, not as platform callee-saved regs) -
+// may be clobbered by handleIRQ. So to make the trap fully transparent we save
+// and restore that entire set; saving only RA/T0-T6/A0-A7 would silently
+// corrupt any live S0-S10 in the interrupted goroutine (handleIRQ uses S0/S1
+// today). handleIRQ is nosplit and FP-free, so the FP registers and the
+// preserved specials (g/TP) need no saving.
 TEXT trapEntry(SB),NOSPLIT|NOFRAME,$0
 	// Switch to this hart's dedicated trap stack (sscratch holds its top, set
 	// in cpuinit/secondaryEntry); sscratch now holds the interrupted sp. The
@@ -50,9 +56,34 @@ interrupt:
 	MOV	A5, 112(SP)
 	MOV	A6, 120(SP)
 	MOV	A7, 128(SP)
+	// S0-S10 (X8,X9,X18-X26): caller-saved under Go's ABIInternal, so handleIRQ
+	// may clobber them and the interrupted goroutine may have live values here.
+	// (S11 = X27 = g is preserved by handleIRQ, so it is intentionally absent.)
+	MOV	S0, 136(SP)
+	MOV	S1, 144(SP)
+	MOV	S2, 152(SP)
+	MOV	S3, 160(SP)
+	MOV	S4, 168(SP)
+	MOV	S5, 176(SP)
+	MOV	S6, 184(SP)
+	MOV	S7, 192(SP)
+	MOV	S8, 200(SP)
+	MOV	S9, 208(SP)
+	MOV	S10, 216(SP)
 
 	CALL	·handleIRQ(SB)
 
+	MOV	136(SP), S0
+	MOV	144(SP), S1
+	MOV	152(SP), S2
+	MOV	160(SP), S3
+	MOV	168(SP), S4
+	MOV	176(SP), S5
+	MOV	184(SP), S6
+	MOV	192(SP), S7
+	MOV	200(SP), S8
+	MOV	208(SP), S9
+	MOV	216(SP), S10
 	MOV	0(SP), RA
 	MOV	8(SP), GP
 	MOV	16(SP), T0

@@ -15,7 +15,10 @@ const (
 	plicClaimCompl = plicBase + 0x200004 // + 0x1000*context (read=claim, write=complete)
 )
 
-// plicContext returns the S-mode interrupt context for a hart.
+// plicContext returns the S-mode interrupt context for a hart. It is nosplit so
+// it is safe on the trap path (handleIRQ) even if not inlined.
+//
+//go:nosplit
 func plicContext(hart uint64) uint64 { return 2*hart + 1 }
 
 func plicSetPriority(source, priority uint32) {

@@ -39,10 +39,12 @@ func fence()
 // nothing pending, so the sret in trapEntry does not storm.
 //
 // CONTRACT: handleIRQ and everything it transitively calls MUST be //go:nosplit
-// and free of floating-point operations. trapEntry saves only integer
-// caller-saved registers and runs on the interrupted goroutine's stack; it does
-// NOT save FP state or grow the stack. Introducing a stack split or an FP op on
-// this path would silently corrupt the interrupted goroutine.
+// and free of floating-point operations. trapEntry runs on this hart's
+// dedicated trap stack and saves the integer registers a Go call may clobber
+// (RA, T0-T6, A0-A7, and S0-S10 - Go's ABIInternal has no callee-saved
+// general registers), but it does NOT save FP state and cannot grow the stack.
+// Introducing a stack split or an FP op on this path would silently corrupt
+// the interrupted goroutine.
 //
 //go:nosplit
 func handleIRQ() {
