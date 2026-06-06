@@ -740,15 +740,40 @@ against a hand-rolled guest.
   covers the decoder, sign-extension, and the payload; the smoke test runs
   `vm mmio` and asserts `guest console: Mmio`. Shell: `vm mmio`.
 
+## Toward M13: external-interrupt injection - how it works
+
+A device signals the guest by raising an interrupt. honk now injects an
+external interrupt into the guest, the analogue of M12's VS-timer injection -
+the path a virtio backend uses to report completion.
+
+- **Inject + delegate + ack.** honk delegates the VS-external interrupt
+  (`hideleg`, VSEIP = bit 10) and injects it (`hvip.VSEIP`); the guest, with
+  `sie.SEIE` (bit 9, the guest's own) + `sstatus.SIE` set and a VS trap vector,
+  takes it as a supervisor-external interrupt. The guest acks by reading the
+  emulated device's MMIO interrupt-status register, on which honk de-asserts
+  (clears `hvip.VSEIP`) - exactly how a real device interrupt clears. (The VS
+  bit positions are 2/6/10 for VSSIP/VSTIP/VSEIP, distinct from the guest-side
+  `sie` positions 1/5/9 - the kind of off-by-one the QEMU run catches.)
+- **Generic run loop, device-driven.** honk raises the IRQ only when the guest
+  has armed the device with a doorbell store (`MMIORegArm`), so the injection is
+  driven by device state (`irqArmed`/`irqPending`), not a run mode - other
+  guests are unaffected. honk's existing HS timer paces the raise (one per
+  quantum), and the guest acks each via the MMIO status read it already proved
+  in `vm mmio`.
+- **Proof.** `vmm.IRQGuest` arms the device, then on each injected interrupt
+  acks it and prints a token, halting after N. `go test -race ./kernel/vmm`
+  decodes its structure; the smoke test runs `vm irq` and asserts
+  `guest IRQs: ###` (three injected + acked interrupts). Shell: `vm irq`.
+
 ## Next: M13
 
 A real guest (Linux): a full guest device tree, PLIC/AIA + virtio device
 backends, and virtio-fs so the guest transparently mounts honk's files - the
-escape hatch for the long tail of real software. The keystones are now in place
-- two-stage paging (VS-stage + sized G-stage), reading guest memory by guest
-pointer (DBCN/`GuestRange`), and MMIO trap-and-emulate (`DecodeMMIO`). The
-remaining work is the devices themselves (an interrupt controller + external-
-interrupt injection via `hvip.VSEIP`, then virtio console/blk/net/fs backends
-over a guest virtqueue), a guest device tree, and time-sharing a hart between a
-vCPU and other honk goroutines (the run loop is still one non-descheduling
-region).
+escape hatch for the long tail of real software. Every device mechanism is now
+in place - two-stage paging (`vm paging`), reading guest memory by guest pointer
+(`vm dbcn`), MMIO trap-and-emulate (`vm mmio`), and device-interrupt injection
+(`vm irq`) - so the next step is a real emulated **virtio device** (its mmio
+registers via `DecodeMMIO`, a split virtqueue parsed from guest memory via
+`GuestRange`, completion signalled via `hvip.VSEIP`), then a guest device tree
+and time-sharing a hart between a vCPU and other honk goroutines (the run loop
+is still one non-descheduling region).

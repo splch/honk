@@ -142,10 +142,14 @@ EOF
 # emulated device register at an unmapped guest-physical address: honk catches
 # the guest-page fault, decodes the instruction, and emulates the register, so
 # "guest console: Mmio" appears only if MMIO trap-and-emulate works (the magic
-# 'M' came from an emulated load, "mio" from emulated stores). No devices
-# needed; the guests run from a G-stage-mapped RAM buffer.
-boot $'\nvm\nvm timer\nvm paging\nvm dbcn\nvm mmio\nexit\n' "$VV"
-want "$VV" "vmm/M11+M12+paging+dbcn+mmio" <<'EOF'
+# 'M' came from an emulated load, "mio" from emulated stores). `vm irq` (also
+# M13 groundwork) runs a guest that arms an emulated device and takes the
+# external interrupts honk injects (hvip.VSEIP), acking each via an MMIO status
+# read - so "guest IRQs: ###" appears only if external-interrupt injection and
+# the device-ack path work (the path a virtio backend signals completion with).
+# No devices needed; the guests run from a G-stage-mapped RAM buffer.
+boot $'\nvm\nvm timer\nvm paging\nvm dbcn\nvm mmio\nvm irq\nexit\n' "$VV"
+want "$VV" "vmm/M11+M12+paging+dbcn+mmio+irq" <<'EOF'
 launching a VS-mode guest
 hello from a guest VM
 guest halted (SBI shutdown)
@@ -157,6 +161,8 @@ launching a dbcn guest
 guest console: dbcn
 launching an mmio guest
 guest console: Mmio
+launching an irq guest
+guest IRQs: ###
 EOF
 
 # Run R: stateless reset clears the writable layer; the immutable core remains.

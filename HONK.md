@@ -519,10 +519,13 @@ is front-loaded; the OS logic on top of it is small because it is Go.
       G-stage (`vmm.GuestRange` + SBI DBCN `console_write`) - shell `vm dbcn`.
       (3) MMIO trap-and-emulate: honk catching a guest's load/store to an
       unmapped device-register address, decoding the instruction
-      (`vmm.DecodeMMIO`), and emulating the register - the keystone for the
-      interrupt controller and virtio backends - shell `vm mmio`. Remaining for
-      M13: the devices themselves (interrupt controller + virtio backends), a
-      guest device tree, and time-sharing a hart. See `docs/STATUS.md`.
+      (`vmm.DecodeMMIO`), and emulating the register - shell `vm mmio`.
+      (4) external-interrupt injection: honk delivering a device interrupt to
+      the guest via `hvip.VSEIP`, acked through an MMIO status read - shell
+      `vm irq`. Together these are the device-emulation toolkit; remaining for
+      M13: a real emulated virtio device (mmio regs + a guest virtqueue +
+      completion IRQ), a guest device tree, and time-sharing a hart. See
+      `docs/STATUS.md`.
 
 ---
 

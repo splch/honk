@@ -377,6 +377,60 @@ func TestDBCNGuestEncoding(t *testing.T) {
 	}
 }
 
+// TestIRQGuestEncoding decodes the generated IRQ payload and asserts its
+// structure: it builds the device base, installs a VS trap vector (loadAddr +
+// csrw vstvec) at a 4-aligned in-image offset, arms the device (an sb store),
+// idles in a wfi self-loop, and its handler acks the device (an lbu load) and
+// shuts down after counting down. A wrong handler address or branch is the
+// silent-fault class; QEMU then proves honk's VSEIP injection drives it.
+func TestIRQGuestEncoding(t *testing.T) {
+	code := decode(t, IRQGuest('#', 3))
+
+	// s1 = MMIOBase, then the handler-address load (li t0,1; slli; addi t0,off).
+	if got := luiAddiVal(code[0], code[1]); got != int64(MMIOBase) {
+		t.Fatalf("prologue builds device base %#x, want MMIOBase %#x", got, MMIOBase)
+	}
+	if code[2] != addi(regT0, regZero, 1) || code[3] != slli(regT0, regT0, 31) {
+		t.Fatalf("handler-address load malformed: %#08x %#08x", code[2], code[3])
+	}
+	handlerOff := int(int32(code[4]) >> 20)
+	if handlerOff%4 != 0 || handlerOff/4 >= len(code) {
+		t.Fatalf("handler offset %d invalid (len %d words)", handlerOff, len(code))
+	}
+	if code[5] != csrw(csrStvec, regT0) {
+		t.Fatalf("code[5] = %#08x, want csrw vstvec,t0", code[5])
+	}
+	// the handler's first instruction acks the device: an lbu (load, width 1).
+	h := handlerOff / 4
+	if acc, ok := DecodeMMIO(code[h]); !ok || acc.Store || acc.Width != 1 {
+		t.Fatalf("handler[0] = %#08x, want an lbu (device ack); got %+v ok=%v", code[h], acc, ok)
+	}
+	// there is a doorbell store (sb) and a wfi; jal x0,-4 wait loop.
+	var stored, waited bool
+	for i := 6; i+1 < len(code); i++ {
+		if acc, ok := DecodeMMIO(code[i]); ok && acc.Store && acc.Width == 1 {
+			stored = true
+		}
+		if code[i] == opWFI && (code[i+1]&0x7f) == 0x6f && jalOff(code[i+1]) == -4 {
+			waited = true
+		}
+	}
+	if !stored {
+		t.Fatal("no doorbell store (sb to arm the device) found")
+	}
+	if !waited {
+		t.Fatal("no wfi; jal x0,-4 wait loop found")
+	}
+	// shutdown tail.
+	sd := len(code) - 3
+	if op, rd, _, _, imm := fields(code[sd]); op != 0x13 || rd != regA7 || imm != SBIShutdown {
+		t.Fatalf("shutdown = %#08x, want li a7,%d", code[sd], SBIShutdown)
+	}
+	if code[sd+1] != opEcall || code[sd+2] != opJ0 {
+		t.Fatalf("shutdown tail = %#08x %#08x", code[sd+1], code[sd+2])
+	}
+}
+
 // imm decoders for the variable-length jump/branch formats, used to verify the
 // generated TimerGuest's control flow lands where intended.
 func jalOff(in uint32) int {

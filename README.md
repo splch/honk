@@ -30,7 +30,7 @@ kernel/        the HS-mode Go program (the OS): boot, SMP demo, shell
 kernel/net.go  networking: virtio-net + gVisor (go-net) -> stdlib net + net/http
 kernel/wasm.go untrusted-code tier: wazero (WASI preview 1), capability-gated
 kernel/display.go  framebuffer: virtio-gpu -> image.RGBA + a test pattern (M9)
-kernel/vm.go   hypervisor demo: `vm` (M11) + `vm timer` (M12) + `vm paging` (two-stage paging) + `vm dbcn` (read guest memory) + `vm mmio` (MMIO trap-and-emulate)
+kernel/vm.go   hypervisor demo: `vm` (M11) + `vm timer` (M12) + `vm paging` + `vm dbcn` (read guest memory) + `vm mmio` (trap-and-emulate) + `vm irq` (interrupt injection)
 kernel/vmm/    pure VMM logic: guest payloads + RV64 encoders + SBI numbers + Sv39x4 G-stage tables (host-tested)
 board/virt/vmm*  H-extension VMM: G-stage paging, the HS<->VS world switch, SBI emulation, VS-timer injection + preemption
 kernel/ui.go   GUI demo: virtio-input events -> the image/draw toolkit (M10)
@@ -78,7 +78,8 @@ timer makes the running guest preemptible - proven by a hand-rolled guest that
 arms a timer, handles each injected interrupt in its own VS trap vector, and
 halts. `make run` drops you at a `honk>` prompt; try `help`, `mount`, `ls`,
 `cat motd`, `net`, `wasm hello.wasm`, `fb`, `ui`, `vm`, `vm timer`, `vm paging`,
-`vm dbcn`, `vm mmio`, `reset --confirm`, and `curl http://localhost:8080/`. **Phase D (display + GUI) is
+`vm dbcn`, `vm mmio`, `vm irq`, `reset --confirm`, and `curl
+http://localhost:8080/`. **Phase D (display + GUI) is
 complete** and **Phase E is under way** - all verified headlessly (QMP
 screendump + input injection for the GUI; H-extension guest runs for the VMM);
 next: M13 - a real guest (Linux) with virtio device backends. See

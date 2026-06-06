@@ -33,8 +33,11 @@ const timerTicks = 5
 // `vm mmio` runs a third: a guest that loads/stores an emulated device register
 // at an unmapped guest-physical address, so honk catches the guest-page fault,
 // decodes the instruction, and emulates the register - MMIO trap-and-emulate,
-// the keystone for the interrupt controller and virtio backends. Guest output
-// appears inline on honk's console.
+// the keystone for the interrupt controller and virtio backends. `vm irq` runs
+// a fourth: a guest that arms an emulated device and takes the external
+// interrupts honk injects (hvip.VSEIP), acking each via an MMIO status read -
+// the device-interrupt path a virtio backend signals completion with. Guest
+// output appears inline on honk's console.
 func vmcmd(fields []string) {
 	if len(fields) > 1 && fields[1] == "timer" {
 		guest := vmm.TimerGuest('*', timerTicks)
@@ -70,6 +73,17 @@ func vmcmd(fields []string) {
 			len(guest))
 		fmt.Print("vm: guest console: ")
 		reason := virt.RunGuest(guest) // the guest's "Mmio" prints inline via the emulated device
+		fmt.Printf("\nvm: %s\n", reason)
+		return
+	}
+
+	if len(fields) > 1 && fields[1] == "irq" {
+		const irqs = 3
+		guest := vmm.IRQGuest('#', irqs)
+		fmt.Printf("vm: launching an irq guest (%d bytes): %d device interrupts via hvip.VSEIP injection\n",
+			len(guest), irqs)
+		fmt.Print("vm: guest IRQs: ")
+		reason := virt.RunGuest(guest) // one '#' prints per injected+acked interrupt
 		fmt.Printf("\nvm: %s\n", reason)
 		return
 	}

@@ -447,10 +447,12 @@ func DBCNGuest() []byte {
 // faults to honk's MMIO trap-and-emulate path. Shared by the guest payload and
 // the board emulator so they agree on the addresses (one owner).
 const (
-	MMIOBase     = 0x1000_0000  // device register window base (below GuestBase)
-	MMIORegMagic = MMIOBase + 0 // load: honk returns MMIOMagic
-	MMIORegOut   = MMIOBase + 8 // store: honk prints the low byte
-	MMIOMagic    = 'M'          // the byte a load of MMIORegMagic returns
+	MMIOBase     = 0x1000_0000   // device register window base (below GuestBase)
+	MMIORegMagic = MMIOBase + 0  // load: honk returns MMIOMagic
+	MMIORegOut   = MMIOBase + 8  // store: honk prints the low byte
+	MMIORegArm   = MMIOBase + 16 // store: arm the device's interrupt (a doorbell)
+	MMIORegIRQ   = MMIOBase + 24 // load: read+ack the IRQ status (1 if pending, else 0)
+	MMIOMagic    = 'M'           // the byte a load of MMIORegMagic returns
 )
 
 // MMIOGuest builds a guest that proves MMIO trap-and-emulate: honk catching a
@@ -479,6 +481,68 @@ func MMIOGuest() []byte {
 	emit(addi(regA7, regZero, SBIShutdown))
 	emit(opEcall)
 	emit(opJ0) // guard against a missed stop
+	return assemble(ins)
+}
+
+// IRQGuest builds a guest that proves external-interrupt injection: honk
+// delivering a device interrupt to the guest by injecting hvip.VSEIP (the
+// external-interrupt analogue of M12's VSTIP timer), the keystone a virtio
+// backend needs to signal completion. The guest installs a VS trap vector,
+// enables VS supervidor-external interrupts (sie.SEIE), and "arms" the emulated
+// device with an MMIO store (a doorbell). honk then injects an external
+// interrupt each quantum; the guest takes it, acks the device by reading its
+// MMIO interrupt-status register (on which honk de-asserts/withdraws VSEIP),
+// prints token, and after count interrupts shuts down via SBI.
+//
+// As in TimerGuest, only the handler's absolute address is data-dependent; the
+// jump/branch offsets are computed from the emitted instruction indices.
+func IRQGuest(token byte, count int) []byte {
+	const (
+		seie = 1 << 9 // sie.SEIE: VS supervisor-external interrupt enable
+		sie  = 1 << 1 // sstatus.SIE: VS global interrupt enable
+	)
+	var ins []uint32
+	emit := func(words ...uint32) { ins = append(ins, words...) }
+
+	emit(loadImm32(regS1, MMIOBase)...) // s1 = device base (survives traps)
+
+	// prologue: install the handler, enable interrupts, init the counter, arm.
+	handlerLoad := len(ins)
+	emit(loadAddr(regT0, 0)...) // li t0, &handler (offset patched below)
+	emit(csrw(csrStvec, regT0)) // vstvec = handler
+	emit(addi(regS0, regZero, count))
+	emit(addi(regT0, regZero, seie))
+	emit(csrs(csrSie, regT0)) // sie.SEIE = 1
+	emit(addi(regT0, regZero, sie))
+	emit(csrs(csrSstatus, regT0)) // sstatus.SIE = 1
+	emit(addi(regT0, regZero, 1))
+	emit(sb(regT0, regS1, MMIORegArm-MMIOBase)) // doorbell: ask honk to raise IRQs
+
+	// wait loop: idle until honk injects the external interrupt.
+	waitIdx := len(ins)
+	emit(opWFI)
+	waitJump := len(ins)
+	emit(0) // jal x0, wait (patched)
+
+	// handler: ack the device, print one token, count down, return or shut down.
+	handlerIdx := len(ins)
+	emit(lbu(regT0, regS1, MMIORegIRQ-MMIOBase)) // read+ack (honk withdraws VSEIP)
+	emit(addi(regA7, regZero, SBIConsolePutchar))
+	emit(addi(regA0, regZero, int(token)))
+	emit(opEcall)
+	emit(addi(regS0, regS0, -1))
+	handlerBranch := len(ins)
+	emit(0)      // beq s0, x0, shutdown (patched)
+	emit(opSret) // return to the wait loop
+
+	shutdownIdx := len(ins)
+	emit(addi(regA7, regZero, SBIShutdown))
+	emit(opEcall)
+	emit(opJ0)
+
+	ins[handlerLoad+2] = addi(regT0, regT0, handlerIdx*4)
+	ins[waitJump] = jal(regZero, (waitIdx-waitJump)*4)
+	ins[handlerBranch] = beq(regS0, regZero, (shutdownIdx-handlerBranch)*4)
 	return assemble(ins)
 }
 

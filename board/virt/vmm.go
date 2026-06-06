@@ -62,11 +62,13 @@ const (
 
 // Interrupt-environment bits the VMM programs for the timer (M12).
 const (
-	sieSTIE     = 1 << 5 // sie: HS supervisor-timer interrupt enable
-	sieSEIE     = 1 << 9 // sie: HS supervisor-external (UART) interrupt enable
-	hidelegVSTI = 1 << 6 // hideleg: delegate the VS-timer interrupt to VS-mode
-	hvipVSTIP   = 1 << 6 // hvip: inject a pending VS-timer interrupt
-	hcounterTM  = 1 << 1 // hcounteren: let VS-mode read the time CSR
+	sieSTIE     = 1 << 5  // sie: HS supervisor-timer interrupt enable
+	sieSEIE     = 1 << 9  // sie: HS supervisor-external (UART) interrupt enable
+	hidelegVSTI = 1 << 6  // hideleg: delegate the VS-timer interrupt to VS-mode
+	hidelegVSEI = 1 << 10 // hideleg: delegate the VS-external interrupt to VS-mode
+	hvipVSTIP   = 1 << 6  // hvip: inject a pending VS-timer interrupt
+	hvipVSEIP   = 1 << 10 // hvip: inject a pending VS-external interrupt (a device IRQ)
+	hcounterTM  = 1 << 1  // hcounteren: let VS-mode read the time CSR
 
 	// scause values for the HS interrupts the run loop sees (bit 63 = interrupt).
 	sTimerInterrupt = uint64(1)<<63 | 5
@@ -130,6 +132,12 @@ type vmRun struct {
 	v        vcpu
 	mem      []byte // the guest's RAM (gpa GuestBase -> mem[0]); see vmm.GuestRange
 	deadline uint64
+
+	// Emulated-device interrupt state. armed is set by the guest's doorbell
+	// store (MMIORegArm); while armed honk raises an external interrupt each
+	// quantum, pending until the guest acks it by reading MMIORegIRQ.
+	irqArmed   bool
+	irqPending bool
 }
 
 // dbcnMaxWrite caps one DBCN console_write so a guest cannot make honk spin
@@ -266,11 +274,11 @@ func (r *vmRun) emulateMMIO() bool {
 		if acc.Reg != 0 {
 			val = r.v.gpr[acc.Reg]
 		}
-		if !mmioStore(gpa, val) {
+		if !r.mmioStore(gpa, val) {
 			return false
 		}
 	} else {
-		val, ok := mmioLoad(gpa)
+		val, ok := r.mmioLoad(gpa)
 		if !ok {
 			return false
 		}
@@ -282,21 +290,36 @@ func (r *vmRun) emulateMMIO() bool {
 	return true
 }
 
-// mmioLoad / mmioStore are the demo device: a magic register and a console-out
-// register (numbers in kernel/vmm). A real virtio/PLIC backend replaces these.
+// mmioLoad / mmioStore are the demo device honk emulates behind the MMIO
+// trap-and-emulate path: a magic register, a console-out register, and an
+// interrupt doorbell + status register (numbers in kernel/vmm). A real
+// virtio/PLIC backend replaces these. They are methods so they can touch the
+// run's device-interrupt state and withdraw an injected IRQ.
 //
 //go:nosplit
-func mmioLoad(gpa uint64) (uint64, bool) {
-	if gpa == vmm.MMIORegMagic {
+func (r *vmRun) mmioLoad(gpa uint64) (uint64, bool) {
+	switch gpa {
+	case vmm.MMIORegMagic:
 		return vmm.MMIOMagic, true
+	case vmm.MMIORegIRQ:
+		if r.irqPending { // reading the status acks the IRQ: the device de-asserts
+			r.irqPending = false
+			writeHvip(readHvip() &^ hvipVSEIP)
+			return 1, true
+		}
+		return 0, true
 	}
 	return 0, false
 }
 
 //go:nosplit
-func mmioStore(gpa, val uint64) bool {
-	if gpa == vmm.MMIORegOut {
+func (r *vmRun) mmioStore(gpa, val uint64) bool {
+	switch gpa {
+	case vmm.MMIORegOut:
 		sbiPutchar(byte(val))
+		return true
+	case vmm.MMIORegArm:
+		r.irqArmed = true // doorbell: honk now raises the device IRQ each quantum
 		return true
 	}
 	return false
@@ -415,10 +438,10 @@ func runGuest(r *vmRun, hgatp uint64) string {
 	writeHgatp(hgatp)
 	hfenceGVMA() // order the new G-stage map before any guest translation
 	writeStvec(uint64(guestVecPC()))
-	writeHideleg(savedHideleg | hidelegVSTI)  // the VS timer is the guest's own
-	writeHcounteren(savedHcnt | hcounterTM)   // let the guest read `time`
-	writeHvip(savedHvip &^ hvipVSTIP)         // nothing injected yet
-	writeSie((savedSie &^ sieSEIE) | sieSTIE) // honk takes the HS timer, not UART
+	writeHideleg(savedHideleg | hidelegVSTI | hidelegVSEI) // VS timer + device IRQ are the guest's
+	writeHcounteren(savedHcnt | hcounterTM)                // let the guest read `time`
+	writeHvip(savedHvip &^ hvipVSTIP)                      // nothing injected yet
+	writeSie((savedSie &^ sieSEIE) | sieSTIE)              // honk takes the HS timer, not UART
 
 	start := readTime()
 	r.armHSTimer()
@@ -452,6 +475,10 @@ func runGuest(r *vmRun, hgatp uint64) string {
 			if r.deadline != 0 && readTime() >= r.deadline {
 				writeHvip(readHvip() | hvipVSTIP) // deliver the guest's timer
 				r.deadline = 0
+			}
+			if r.irqArmed && !r.irqPending { // raise the emulated device's IRQ
+				r.irqPending = true
+				writeHvip(readHvip() | hvipVSEIP)
 			}
 			r.armHSTimer()
 			continue
