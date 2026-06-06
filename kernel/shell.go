@@ -132,7 +132,7 @@ func blk() {
 		return
 	}
 	bs := d.BlockSize()
-	fmt.Printf("blk: virtio-blk  %d blocks x %d B = %d MiB\n",
+	fmt.Printf("blk: %d blocks x %d B = %d MiB\n",
 		d.Blocks(), bs, d.Blocks()*int64(bs)>>20)
 
 	last := d.Blocks() - 1

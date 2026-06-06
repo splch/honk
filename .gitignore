@@ -7,3 +7,4 @@
 # data images for NVMe/virtio-blk
 /data.img
 /disk.img
+/nvme.img

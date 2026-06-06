@@ -13,8 +13,12 @@ cd "$(dirname "$0")/.."
 
 { [ -f boot.bin ] && [ -f honk.elf ]; } || tools/build.sh
 
-# Backing store for the virtio-blk device (created once, 16 MiB).
+# Backing stores (created once, 16 MiB each). honk uses NVMe as the primary
+# block device and virtio-blk as the fallback; both are attached so either path
+# can be exercised.
+NVME="${NVME:-nvme.img}"
 DISK="${DISK:-disk.img}"
+[ -f "$NVME" ] || dd if=/dev/zero of="$NVME" bs=1048576 count=16 2>/dev/null
 [ -f "$DISK" ] || dd if=/dev/zero of="$DISK" bs=1048576 count=16 2>/dev/null
 
 exec qemu-system-riscv64 \
@@ -28,5 +32,7 @@ exec qemu-system-riscv64 \
 	-no-reboot \
 	-kernel boot.bin \
 	-device loader,file=honk.elf \
+	-drive file="$NVME",if=none,id=nvm,format=raw \
+	-device nvme,serial=honk,drive=nvm \
 	-drive file="$DISK",if=none,id=blk0,format=raw \
 	-device virtio-blk-device,drive=blk0

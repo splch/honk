@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build honk and boot it under QEMU, asserting the expected M0-M2 output.
-# Exits non-zero on any missing line or on a boot hang. CI-friendly.
+# Build honk and boot it under QEMU, asserting the expected M0-M3 output for
+# both block backends (NVMe primary, virtio-blk fallback). Exits non-zero on
+# any missing line or a boot hang. CI-friendly.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,56 +14,67 @@ go test -race -count=1 ./kernel/proc/ || { echo "SMOKE FAIL: proc race test" >&2
 
 tools/build.sh >/dev/null
 
-# Backing store for the virtio-blk device (M3).
-DISK="$(mktemp)"
-dd if=/dev/zero of="$DISK" bs=1048576 count=16 2>/dev/null
-trap 'rm -f "$DISK"' EXIT
+NVME="$(mktemp)"
+VB="$(mktemp)"
+A="$(mktemp)"
+B="$(mktemp)"
+trap 'rm -f "$NVME" "$VB" "$A" "$B"' EXIT
+dd if=/dev/zero of="$NVME" bs=1048576 count=16 2>/dev/null
+dd if=/dev/zero of="$VB" bs=1048576 count=16 2>/dev/null
 
-# Drive the shell over the UART. The leading newline absorbs a startup byte
-# that OpenSBI may consume during its own UART init (interactive use, where the
-# user types after the prompt, is unaffected). QEMU installs its own SIGALRM
-# handler, so the watchdog must SIGKILL the PID, not rely on alarm()/timeout.
-out_file="$(mktemp)"
-printf '\nhelp\nblk\nrun\nps\ncrash\nstress 16\nps\nexit\n' | \
-	qemu-system-riscv64 -machine virt -global virtio-mmio.force-legacy=false \
-		-cpu rv64,h=true -smp "$SMP" -m 512M \
-		-nographic -bios default -no-reboot \
-		-kernel boot.bin -device loader,file=honk.elf \
-		-drive file="$DISK",if=none,id=blk0,format=raw \
-		-device virtio-blk-device,drive=blk0 >"$out_file" 2>&1 &
-qpid=$!
-( sleep "$WATCHDOG"; kill -9 "$qpid" 2>/dev/null ) &
-wpid=$!
-wait "$qpid" 2>/dev/null || true
-kill "$wpid" 2>/dev/null || true
-out="$(cat "$out_file")"
-rm -f "$out_file"
+# boot INPUT OUTFILE EXTRA-QEMU-ARGS... - SIGKILL watchdog (QEMU ignores
+# alarm()/timeout, so a hung guest must be killed by PID).
+boot() {
+	local input="$1" outf="$2"
+	shift 2
+	printf '%s' "$input" |
+		qemu-system-riscv64 -machine virt -global virtio-mmio.force-legacy=false \
+			-cpu rv64,h=true -smp "$SMP" -m 512M -nographic -bios default -no-reboot \
+			-kernel boot.bin -device loader,file=honk.elf "$@" >"$outf" 2>&1 &
+	local qpid=$!
+	(
+		sleep "$WATCHDOG"
+		kill -9 "$qpid" 2>/dev/null
+	) &
+	local wpid=$!
+	wait "$qpid" 2>/dev/null || true
+	kill "$wpid" 2>/dev/null || true
+}
 
-echo "$out"
-echo "----------------------------------------"
+# want OUTFILE LABEL <<EOF ...required substrings... EOF
+want() {
+	local outf="$1" label="$2" fail=0 line
+	while IFS= read -r line; do
+		grep -qF -- "$line" "$outf" || { echo "SMOKE FAIL ($label): missing: $line" >&2; fail=1; }
+	done
+	[ "$fail" -eq 0 ] || { cat "$outf"; exit 1; }
+}
 
-fail=0
-while IFS= read -r want; do
-	if ! grep -qF -- "$want" <<<"$out"; then
-		echo "SMOKE FAIL: missing line: $want" >&2
-		fail=1
-	fi
-done <<'EOF'
+# Run A: NVMe primary, full M0-M3 shell exercise.
+boot $'\nhelp\nblk\nrun\nps\ncrash\nstress 16\nps\nexit\n' "$A" \
+	-drive file="$NVME",if=none,id=nvm,format=raw -device nvme,serial=honk,drive=nvm
+cat "$A"
+want "$A" "NVMe" <<'EOF'
 honk: entered main
 honk: HS-mode boot ok
 SMP up  harts=4  GOMAXPROCS=4
 SMP OK - goroutines ran on
 shell ready
+storage = NVMe
 blk: read/write self-test OK
-spawned PID 2
 init
 kernel survives
 ran across
 honk: shutting down
 EOF
 
-if [ "$fail" -ne 0 ]; then
-	echo "SMOKE FAIL" >&2
-	exit 1
-fi
+# Run B: virtio-blk fallback (no NVMe attached).
+boot $'\nblk\nexit\n' "$B" \
+	-drive file="$VB",if=none,id=blk0,format=raw -device virtio-blk-device,drive=blk0
+want "$B" "virtio-blk" <<'EOF'
+storage = virtio-blk
+blk: read/write self-test OK
+EOF
+
+echo "----------------------------------------"
 echo "SMOKE PASS"

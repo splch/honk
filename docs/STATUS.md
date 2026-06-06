@@ -21,7 +21,7 @@ distribution (`tamago-go`) is auto-built on first use into the OS cache dir.
 | **M0 boot + SMP + hello** | ✅ **complete** | Boots in HS-mode under OpenSBI on QEMU virt; **all harts run Go Ms** (`GOMAXPROCS=nharts`), scheduler spreads goroutines across every hart; clean SBI shutdown. Verified at `-smp 1/4/8`, boot-hart-agnostic. |
 | **M1 IRQ + console + shell** | ✅ **complete** | honk S-mode trap vector (proper `sret`); UART RX interrupt → PLIC → ring → channel; interactive shell over the UART; S-mode exceptions print `scause`/`sepc`/`stval` and halt. |
 | **M2 process model** | ✅ **complete** | `proc` table = goroutine + `context` (cancel = kill) + capabilities; `run`/`ps`/`kill`/`crash`/`reap`/`stress` shell commands; `recover()` fault domains (a panicking process is reaped, kernel + siblings survive); race-tested (`go test -race ./kernel/proc`) and stressed under `-smp 4`. |
-| **M3 block device** | ✅ **complete** | `block.Device` interface backed by a virtio-blk driver (virtio-mmio v2, split virtqueue, 3-descriptor chains, polled completion); `blk` shell self-test; verified detection, read/write round-trip, and persistence to the backing file. NVMe-over-PCIe is a future backend behind the same interface. |
+| **M3 block device** | ✅ **complete** | `block.Device` interface with two backends: **NVMe-over-PCIe** (PCIe ECAM enumeration + BAR assignment, controller bring-up, admin+I/O queues, identify, PRP read/write - primary) and **virtio-blk** (virtio-mmio v2, split virtqueue - fallback). `blk` shell self-test; both verified for detection, read/write round-trip, and on-disk persistence; smoke test gates both. |
 
 **Phase A complete; Phase B (storage) underway.** Next: M4 KV store + VFS.
 
@@ -178,8 +178,8 @@ larger `-smp` values.
 (`BlockSize`/`Blocks`/`ReadBlocks`/`WriteBlocks`), no transport details leaked.
 It is pure Go, so the storage stack above it (the M4 KV store) is host-testable.
 
-The backend is a focused **virtio-blk** driver (`board/virt/virtioblk.go`) over
-virtio-mmio v2 (RV64.md §7.4): probe the 8 mmio slots for `DeviceID==2`, do the
+Two backends implement it. The **virtio-blk** driver (`board/virt/virtioblk.go`)
+over virtio-mmio v2 (RV64.md §7.4) is the fallback: probe the 8 mmio slots for `DeviceID==2`, do the
 reset/ACK/feature(`VERSION_1`)/`FEATURES_OK` handshake, set up one split
 virtqueue, read capacity from config. Each request is a 3-descriptor chain
 (header / data / status) published to the available ring; completion is polled
@@ -192,10 +192,15 @@ legacy v1; honk targets the modern v2 transport) plus a `-drive` +
 `virtio-blk-device`. The `blk` shell command runs a write/read-back self-test;
 persistence to the backing file is verified.
 
-**Scoped out of M3 (behind the interface):** NVMe-over-PCIe (PCIe ECAM + NVMe
-queues). virtio-blk is the roadmap's named fallback and the working path on
-QEMU virt's default virtio; NVMe can be added as a second `block.Device` with
-no change to anything above it.
+The **NVMe-over-PCIe** backend (`board/virt/nvme.go` + `pci.go`) is the roadmap
+primary: enumerate PCIe ECAM (0x30000000) for class 01/08/02, assign BAR0 in
+the MMIO window (OpenSBI doesn't), enable memory + bus-master, bring the
+controller up (reset, admin SQ/CQ, `CC.EN`), create one I/O queue pair, and
+identify namespace 1 for capacity/LBA size. Read/Write commands carry data via
+PRP pointers; transfers are split to at most one page so PRP1[+PRP2] suffice
+(no PRP lists), exploiting the buffer's physical contiguity. Completions are
+polled on the CQ phase tag. `ProbeBlock` selects NVMe if present, else
+virtio-blk - nothing above storage knows the difference.
 
 ## Next: M4
 

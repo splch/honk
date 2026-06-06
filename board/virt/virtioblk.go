@@ -107,9 +107,19 @@ func InitStorage() { blockDev = ProbeBlock() }
 // Block returns the system block device, or nil if none was found.
 func Block() block.Device { return blockDev }
 
-// ProbeBlock scans the virtio-mmio slots for a block device and returns an
-// initialized driver, or nil if none is present.
+// ProbeBlock returns the system block device: NVMe-over-PCIe if present
+// (roadmap primary), otherwise virtio-blk (fallback). Both implement the same
+// block.Device, so nothing above storage depends on which is used.
 func ProbeBlock() block.Device {
+	if d := probeNVMe(); d != nil {
+		return d
+	}
+	return probeVirtioBlk()
+}
+
+// probeVirtioBlk scans the virtio-mmio slots for a block device and returns an
+// initialized driver, or nil if none is present.
+func probeVirtioBlk() block.Device {
 	for i := 0; i < virtioSlots; i++ {
 		base := uintptr(virtioBase + i*virtioStride)
 		if mmioRead32(base+regMagic) != virtioMagicValue ||
@@ -119,6 +129,7 @@ func ProbeBlock() block.Device {
 		}
 		d := &virtioBlk{base: base}
 		if d.init() {
+			println("honk: storage = virtio-blk,", d.blocks, "blocks x", virtioBlockSize, "bytes")
 			return d
 		}
 	}
