@@ -23,8 +23,11 @@ const timerTicks = 5
 // H-ext enable, G-stage paging, and trap-and-emulate). `vm timer` runs the M12
 // demo: a guest that arms an SBI timer and, on each VS-timer interrupt honk
 // injects, prints a '*' and reprograms the timer, then shuts down after a few
-// ticks - proving the timer, interrupt injection, and preemption path. Guest
-// output appears inline on honk's console.
+// ticks - proving the timer, interrupt injection, and preemption path. `vm
+// paging` runs the M13-groundwork demo: a guest that enables its own VS-stage
+// Sv39 paging (vsatp) over honk's G-stage and round-trips a value through a
+// second-megapage address - proving two-stage translation. Guest output
+// appears inline on honk's console.
 func vmcmd(fields []string) {
 	if len(fields) > 1 && fields[1] == "timer" {
 		guest := vmm.TimerGuest('*', timerTicks)
@@ -33,6 +36,14 @@ func vmcmd(fields []string) {
 		fmt.Print("vm: guest ticks: ")
 		reason := virt.RunGuest(guest) // the '*' ticks print inline as they fire
 		fmt.Printf("\nvm: %s\n", reason)
+		return
+	}
+
+	if len(fields) > 1 && fields[1] == "paging" {
+		guest := vmm.PagingGuest("honk: guest enabled VS-stage paging\n", vmm.GuestBase+vmm.VSRootOff)
+		fmt.Printf("vm: launching a paging guest (%d bytes): enables its own Sv39 (vsatp) over honk's G-stage\n",
+			len(guest))
+		fmt.Printf("vm: %s\n", virt.RunPagingGuest(guest))
 		return
 	}
 

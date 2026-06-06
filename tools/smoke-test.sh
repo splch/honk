@@ -129,15 +129,21 @@ EOF
 # trap vector, arms an SBI timer, and on each VS-timer interrupt honk injects
 # (hvip.VSTIP) prints a '*' and reprograms it, then shuts down after 5 ticks -
 # proving SBI Base/TIME emulation, VS-timer interrupt injection, and timer-
-# driven preemption. The '*****' appears only if the whole chain works. No
-# devices needed; the guest runs from a G-stage-mapped RAM buffer.
-boot $'\nvm\nvm timer\nexit\n' "$VV"
-want "$VV" "vmm/M11+M12" <<'EOF'
+# driven preemption. The '*****' appears only if the whole chain works. M13
+# groundwork: `vm paging` runs a guest that enables its OWN VS-stage Sv39 paging
+# (vsatp) over honk's (now sized, multi-megapage) G-stage and round-trips a
+# sentinel through a second-megapage virtual address - the printed line appears
+# only if two-stage (VS + G) translation works end to end (a wrong map faults
+# instead). No devices needed; the guest runs from a G-stage-mapped RAM buffer.
+boot $'\nvm\nvm timer\nvm paging\nexit\n' "$VV"
+want "$VV" "vmm/M11+M12+paging" <<'EOF'
 launching a VS-mode guest
 hello from a guest VM
 guest halted (SBI shutdown)
 launching a timer guest
 guest ticks: *****
+launching a paging guest
+guest enabled VS-stage paging
 EOF
 
 # Run R: stateless reset clears the writable layer; the immutable core remains.

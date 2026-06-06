@@ -30,10 +30,12 @@ const (
 )
 
 // hgatp.MODE encodings (RV64). Sv39x4 is "Sv39 with a 2-bit-wider guest
-// physical address", so its root page table is four pages (16 KiB).
+// physical address", so its root page table is four pages (16 KiB). SatpSv39 is
+// the satp/vsatp MODE for ordinary Sv39 - the guest's own (VS-stage) paging.
 const (
 	HgatpBare   = 0
 	HgatpSv39x4 = 8
+	SatpSv39    = 8
 )
 
 // Sv39 page-table entry bits (the G-stage uses the identical PTE format as
@@ -50,42 +52,89 @@ const (
 	pteD = 1 << 7 // dirty
 )
 
-// LeafRWX is the permission set honk maps guest RAM with: read, write, execute,
-// user, accessed, dirty. (G is left clear; it is reserved in G-stage PTEs.)
+// LeafRWX is the permission set honk maps guest RAM with in the G-stage: read,
+// write, execute, user, accessed, dirty. G-stage accesses are checked as
+// U-mode, so the U bit is required; A/D are pre-set since honk does not swap
+// (the Svade-portable choice, RV64.md §5.3). (G is reserved in G-stage PTEs.)
 const LeafRWX = pteV | pteR | pteW | pteX | pteU | pteA | pteD
 
+// VSLeafRWX is the permission set for VS-stage (the guest's own Sv39) leaves:
+// read, write, execute, accessed, dirty - but NOT user, because the guest runs
+// in VS-mode (supervisor) and an S-mode fetch of a U=1 page faults (RV64.md
+// §5.5). honk seeds a guest an identity VS map with these bits so a hand-rolled
+// payload can prove two-stage translation by turning on its own paging.
+const VSLeafRWX = pteV | pteR | pteW | pteX | pteA | pteD
+
 // MegapageSize is the size of a level-1 Sv39 leaf (a 2 MiB "megapage"). honk
-// maps a guest with a single megapage, so its RAM must be 2 MiB-aligned and the
-// guest fits within 2 MiB - ample for the M11 payload.
+// maps a guest as a run of these, so its RAM must be 2 MiB-aligned.
 const MegapageSize = 2 << 20
 
-// RootSize and L1Size are the byte sizes (and required alignments) of the two
-// G-stage tables. The Sv39x4 root is 16 KiB (2048 entries) and must be 16
-// KiB-aligned; a normal next-level table is 4 KiB (512 entries).
+// Table geometry. The Sv39x4 G-stage root is 16 KiB (2048 entries, 16 KiB-
+// aligned); every other table - a G-stage level-1 table, and the VS-stage root
+// and level-1 table (ordinary Sv39, 512 entries) - is one 4 KiB page.
 const (
-	RootSize = 16384
-	L1Size   = 4096
+	RootSize      = 16384
+	L1Size        = 4096
+	PageTableSize = 4096
+)
+
+// Guest memory layout, shared by the payload generators and the runtime so the
+// guest-physical addresses they each compute agree (one owner of the decision).
+// The guest's RAM begins at GuestBase, like a real RISC-V machine at
+// 0x8000_0000; honk's G-stage maps it. VSRootOff/VSL1Off place the VS-stage page
+// tables honk seeds into the guest's RAM, page-aligned and clear of the (small)
+// payload at offset 0.
+const (
+	GuestBase = 0x8000_0000
+	VSRootOff = 0x4000
+	VSL1Off   = 0x5000
 )
 
 // pte packs a physical address and flag bits into an Sv39 page-table entry:
 // PPN occupies bits 53:10, so pa>>12 is shifted left by 10.
 func pte(pa, flags uint64) uint64 { return (pa>>12)<<10 | flags }
 
-// WriteGStage fills a 16-KiB Sv39x4 root and a 4-KiB level-1 table so that a
-// single 2 MiB megapage maps guest-physical guestBase to supervisor-physical
-// guestPA with LeafRWX permissions. rootPA and l1PA are the supervisor-physical
-// addresses of the two tables (honk is identity-mapped, so they equal the Go
-// slices' addresses). guestBase must be 2 MiB-aligned.
+// megapageCount is how many 2 MiB megapage leaves cover size bytes.
+func megapageCount(size uint64) uint64 { return (size + MegapageSize - 1) / MegapageSize }
+
+// mapMegapages writes the single root entry pointing at the level-1 table l1
+// (at address l1PA), then fills consecutive level-1 entries mapping
+// [base, base+size) to [pa, pa+size) as 2 MiB megapage leaves with leafFlags.
+// It is the one place the megapage page-table layout lives, shared by the
+// G-stage (Sv39x4) and VS-stage (Sv39) builders.
 //
-// The map is exactly what hgatp = (Sv39x4<<60 | rootPA>>12) then needs; the one
-// megapage covers [guestBase, guestBase+2 MiB), enough for the whole payload.
-func WriteGStage(root, l1 []byte, rootPA, l1PA, guestPA, guestBase uint64) {
-	vpn2 := (guestBase >> 30) & 0x7ff // Sv39x4 root index is 11 bits
-	vpn1 := (guestBase >> 21) & 0x1ff // level-1 index is 9 bits
-	// level-1 entry: a 2 MiB leaf (R/W/X set => leaf) backing the guest's RAM.
-	binary.LittleEndian.PutUint64(l1[vpn1*8:], pte(guestPA, LeafRWX))
-	// root entry: a pointer to the level-1 table (no R/W/X => non-leaf, V only).
+// base must be 1 GiB-aligned and size <= 1 GiB, so every leaf shares one root
+// slot and one level-1 table (512 megapages = 1 GiB) - ample for honk's guests
+// and keeping both tables to the simple two-level shape. (The root index is the
+// same value for Sv39 and Sv39x4 at honk's GuestBase, so no per-mode mask.)
+func mapMegapages(root, l1 []byte, l1PA, pa, base, size, leafFlags uint64) {
+	vpn2 := base >> 30
+	vpn1 := (base >> 21) & 0x1ff
+	for i, n := uint64(0), megapageCount(size); i < n; i++ {
+		binary.LittleEndian.PutUint64(l1[(vpn1+i)*8:], pte(pa+i*MegapageSize, leafFlags))
+	}
 	binary.LittleEndian.PutUint64(root[vpn2*8:], pte(l1PA, pteV))
+}
+
+// WriteGStage fills a 16-KiB Sv39x4 root and a 4-KiB level-1 table so that
+// [guestBase, guestBase+size) (guest-physical) maps to [guestPA, guestPA+size)
+// (supervisor-physical) as 2 MiB megapages with G-stage (RWX|U|A|D) leaves.
+// l1PA is the supervisor-physical address of the level-1 table (honk is
+// identity-mapped, so it equals the slice's address).
+//
+// The map is what hgatp = Hgatp(rootPA) then translates against.
+func WriteGStage(root, l1 []byte, l1PA, guestPA, guestBase, size uint64) {
+	mapMegapages(root, l1, l1PA, guestPA, guestBase, size, LeafRWX)
+}
+
+// WriteVSStage fills an ordinary Sv39 root (4 KiB) and level-1 table so the
+// guest's own paging identity-maps [guestBase, guestBase+size): guest-virtual
+// equals guest-physical, as 2 MiB VS-stage leaves (RWX|A|D, no U). honk seeds
+// this into the guest's RAM; a guest that loads vsatp with this root and fences
+// then runs under two-stage translation (VS-stage here, then the G-stage above).
+// l1PA is the guest-physical address of the level-1 table.
+func WriteVSStage(root, l1 []byte, l1PA, guestBase, size uint64) {
+	mapMegapages(root, l1, l1PA, guestBase, guestBase, size, VSLeafRWX)
 }
 
 // Hgatp returns the hgatp value selecting Sv39x4 G-stage translation rooted at
@@ -208,6 +257,56 @@ func TimerGuest(tick byte, ticks int) []byte {
 	ins[waitJump] = jal(regZero, (waitIdx-waitJump)*4)
 	ins[handlerBranch] = beq(regS0, regZero, (shutdownIdx-handlerBranch)*4)
 
+	return assemble(ins)
+}
+
+// PagingGuest builds a guest that proves two-stage translation by enabling its
+// own VS-stage Sv39 paging. honk seeds an identity VS page table into the guest's
+// RAM (WriteVSStage) whose root is at vsRootGPA; this payload loads vsatp with it
+// (satp aliases to vsatp under V=1), fences, then - to prove the new map is live
+// and honk's G-stage backs more than the first megapage - stores a sentinel
+// through a guest-virtual address in the second megapage and reads it back,
+// printing msg and halting only if it round-trips. A wrong map instead faults on
+// the post-vsatp fetch or the store (reported by the run loop and leaving msg
+// unprinted), so the printed msg is the end-to-end proof. msg is plain ASCII.
+func PagingGuest(msg string, vsRootGPA uint64) []byte {
+	const sentinel = 0x5a // an arbitrary byte to round-trip through the 2nd megapage
+
+	var ins []uint32
+	emit := func(words ...uint32) { ins = append(ins, words...) }
+
+	// Enable the guest's own Sv39 paging: vsatp = (Sv39<<60) | (vsRootGPA>>12).
+	// Sv39<<60 and the (~20-bit) PPN are disjoint, so add composes them.
+	emit(addi(regT0, regZero, SatpSv39))
+	emit(slli(regT0, regT0, 60))
+	emit(loadImm32(regT1, uint32(vsRootGPA>>12))...)
+	emit(add(regT0, regT0, regT1))
+	emit(csrw(csrSatp, regT0)) // satp aliases to vsatp under V=1
+	emit(opSfenceVMA)          // flush the guest's VS-stage TLB
+
+	// Prove translation is live across the second megapage: write then read a
+	// sentinel at guest VA GuestBase+MegapageSize (= 0x401 << 21).
+	emit(addi(regT0, regZero, sentinel))
+	emit(addi(regT1, regZero, (GuestBase+MegapageSize)>>21))
+	emit(slli(regT1, regT1, 21))
+	emit(sd(regT0, regT1, 0))
+	emit(ld(regT2, regT1, 0))
+	failBranch := len(ins)
+	emit(0) // bne t2,t0,shutdown  (patched: mismatch -> halt without printing msg)
+
+	// Success: print msg via the legacy SBI console, then shut down.
+	for i := 0; i < len(msg); i++ {
+		emit(addi(regA7, regZero, SBIConsolePutchar))
+		emit(addi(regA0, regZero, int(msg[i])))
+		emit(opEcall)
+	}
+
+	shutdownIdx := len(ins)
+	emit(addi(regA7, regZero, SBIShutdown))
+	emit(opEcall)
+	emit(opJ0) // guard against a missed stop
+
+	ins[failBranch] = bne(regT2, regT0, (shutdownIdx-failBranch)*4)
 	return assemble(ins)
 }
 

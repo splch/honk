@@ -72,60 +72,101 @@ func TestDemoGuestEncoding(t *testing.T) {
 	}
 }
 
-// TestWriteGStage checks the Sv39x4 G-stage tables map guestBase to guestPA via
-// a 2 MiB megapage: the right root/level-1 indices, a non-leaf root pointer to
-// the level-1 table, and a level-1 leaf with the guest's PPN and RWX|U|A|D. A
-// wrong U bit or wrong index is exactly the "works on QEMU / silent guest-page
-// fault" class, so it is pinned here.
+// TestWriteGStage checks the Sv39x4 G-stage tables map a multi-megapage region:
+// the right root/level-1 indices, a non-leaf root pointer to the level-1 table,
+// and one G-stage leaf (RWX|U|A|D, correct PPN) per megapage. A wrong U bit, a
+// wrong index, or an off-by-one in the size->megapage-count math is exactly the
+// "works on QEMU / silent guest-page fault" class, so it is pinned here.
 func TestWriteGStage(t *testing.T) {
 	root := make([]byte, RootSize)
 	l1 := make([]byte, L1Size)
 
 	const (
-		rootPA    = 0x9000_0000
 		l1PA      = 0x9000_4000
-		guestPA   = 0x9020_0000 // 2 MiB aligned host buffer
-		guestBase = 0x8000_0000 // guest sees its RAM here
+		guestPA   = 0x9020_0000      // 2 MiB aligned host buffer
+		guestBase = 0x8000_0000      // guest sees its RAM here
+		size      = 2 * MegapageSize // two megapages -> two leaves
 	)
-	WriteGStage(root, l1, rootPA, l1PA, guestPA, guestBase)
+	WriteGStage(root, l1, l1PA, guestPA, guestBase, size)
 
-	// Indices for guestBase 0x8000_0000.
-	vpn2 := (uint64(guestBase) >> 30) & 0x7ff // = 2
+	vpn2 := uint64(guestBase) >> 30           // = 2
 	vpn1 := (uint64(guestBase) >> 21) & 0x1ff // = 0
 	if vpn2 != 2 || vpn1 != 0 {
 		t.Fatalf("indices vpn2=%d vpn1=%d, want 2,0", vpn2, vpn1)
 	}
 
 	rootE := binary.LittleEndian.Uint64(root[vpn2*8:])
-	if rootE&pteV == 0 {
-		t.Fatal("root entry not valid")
-	}
-	if rootE&(pteR|pteW|pteX) != 0 {
-		t.Fatalf("root entry %#x has R/W/X set; must be a non-leaf pointer", rootE)
+	if rootE&pteV == 0 || rootE&(pteR|pteW|pteX) != 0 {
+		t.Fatalf("root entry %#x: want a valid non-leaf pointer", rootE)
 	}
 	if got := (rootE >> 10) << 12; got != l1PA {
 		t.Fatalf("root entry points at %#x, want l1 table %#x", got, uint64(l1PA))
 	}
 
-	leaf := binary.LittleEndian.Uint64(l1[vpn1*8:])
 	const wantFlags = pteV | pteR | pteW | pteX | pteU | pteA | pteD
-	if leaf&0xff != wantFlags {
-		t.Fatalf("leaf flags = %#x, want %#x (RWX|U|A|D|V)", leaf&0xff, uint64(wantFlags))
+	for i := uint64(0); i < 2; i++ { // one leaf per megapage
+		leaf := binary.LittleEndian.Uint64(l1[(vpn1+i)*8:])
+		if leaf&0xff != wantFlags {
+			t.Fatalf("leaf %d flags = %#x, want %#x (RWX|U|A|D|V)", i, leaf&0xff, uint64(wantFlags))
+		}
+		if leaf&pteU == 0 {
+			t.Fatalf("leaf %d U bit clear: G-stage accesses are U-mode and would fault", i)
+		}
+		if got := (leaf >> 10) << 12; got != uint64(guestPA)+i*MegapageSize {
+			t.Fatalf("leaf %d maps to %#x, want %#x", i, got, uint64(guestPA)+i*MegapageSize)
+		}
 	}
-	if leaf&pteU == 0 {
-		t.Fatal("leaf U bit clear: G-stage accesses are U-mode and would fault")
+	// The third level-1 slot (beyond the mapped region) stays invalid.
+	if v := binary.LittleEndian.Uint64(l1[(vpn1+2)*8:]); v != 0 {
+		t.Fatalf("l1[%d] = %#x, want 0 (only two megapages mapped)", vpn1+2, v)
 	}
-	if got := (leaf >> 10) << 12; got != guestPA {
-		t.Fatalf("leaf maps to %#x, want guest RAM %#x", got, uint64(guestPA))
-	}
-
-	// Every other root/level-1 slot must be zero (invalid).
+	// Every root slot but vpn2 stays invalid.
 	for i := 0; i < RootSize/8; i++ {
 		if uint64(i) == vpn2 {
 			continue
 		}
 		if v := binary.LittleEndian.Uint64(root[i*8:]); v != 0 {
 			t.Fatalf("root[%d] = %#x, want 0", i, v)
+		}
+	}
+}
+
+// TestWriteVSStage checks the VS-stage (ordinary Sv39) identity map honk seeds
+// for a paging guest: a non-leaf root pointer, and one identity leaf per
+// megapage with RWX|A|D but NOT U (the guest runs in VS-mode/supervisor, and an
+// S-mode fetch of a U=1 page faults). The missing-U requirement is the inverse
+// of the G-stage's required-U, so it is pinned separately.
+func TestWriteVSStage(t *testing.T) {
+	root := make([]byte, PageTableSize)
+	l1 := make([]byte, PageTableSize)
+
+	const (
+		l1PA      = 0x8000_5000 // guest-physical address of the level-1 table
+		guestBase = 0x8000_0000
+		size      = 2 * MegapageSize
+	)
+	WriteVSStage(root, l1, l1PA, guestBase, size)
+
+	vpn2 := uint64(guestBase) >> 30
+	rootE := binary.LittleEndian.Uint64(root[vpn2*8:])
+	if rootE&pteV == 0 || rootE&(pteR|pteW|pteX) != 0 {
+		t.Fatalf("VS root entry %#x: want a valid non-leaf pointer", rootE)
+	}
+	if got := (rootE >> 10) << 12; got != l1PA {
+		t.Fatalf("VS root points at %#x, want l1 %#x", got, uint64(l1PA))
+	}
+
+	const wantFlags = pteV | pteR | pteW | pteX | pteA | pteD // NO U
+	for i := uint64(0); i < 2; i++ {
+		leaf := binary.LittleEndian.Uint64(l1[i*8:])
+		if leaf&0xff != wantFlags {
+			t.Fatalf("VS leaf %d flags = %#x, want %#x (RWX|A|D|V, no U)", i, leaf&0xff, uint64(wantFlags))
+		}
+		if leaf&pteU != 0 {
+			t.Fatalf("VS leaf %d has U set: an S-mode fetch of a U page faults", i)
+		}
+		if got := (leaf >> 10) << 12; got != uint64(guestBase)+i*MegapageSize {
+			t.Fatalf("VS leaf %d maps %#x, want identity %#x", i, got, uint64(guestBase)+i*MegapageSize)
 		}
 	}
 }
@@ -159,6 +200,10 @@ func beqOff(in uint32) int {
 	}
 	return int(int32(imm))
 }
+
+// bneOff decodes a bne's branch offset (the B-type immediate is scrambled
+// identically to beq's).
+func bneOff(in uint32) int { return beqOff(in) }
 
 // luiAddiVal reconstructs the value built by a lui;addi pair (loadImm32). The
 // addi immediate is a signed 12-bit field in bits [31:20], so it is
@@ -197,7 +242,7 @@ func TestEncoders(t *testing.T) {
 		t.Errorf("loadAddr words = %#08x %#08x %#08x", a[0], a[1], a[2])
 	}
 
-	// jal/beq offsets, including negative (a backward self-loop) and the
+	// jal/beq/bne offsets, including negative (a backward self-loop) and the
 	// odd-bit scrambling.
 	for _, off := range []int{0, 4, -4, 40, 100, -100, 2044, -2048} {
 		if got := jalOff(jal(regZero, off)); got != off {
@@ -206,6 +251,76 @@ func TestEncoders(t *testing.T) {
 		if got := beqOff(beq(regS0, regZero, off)); got != off {
 			t.Errorf("beq off %d round-trips to %d", off, got)
 		}
+		if got := bneOff(bne(regS0, regZero, off)); got != off {
+			t.Errorf("bne off %d round-trips to %d", off, got)
+		}
+	}
+
+	// sfence.vma and the doubleword load/store the paging guest uses.
+	if opSfenceVMA != 0x12000073 {
+		t.Errorf("sfence.vma = %#08x, want 0x12000073", opSfenceVMA)
+	}
+	if got := ld(regT2, regT1, 0); got != 0x00033383 {
+		t.Errorf("ld t2,0(t1) = %#08x, want 0x00033383", got)
+	}
+	if got := sd(regT0, regT1, 0); got != 0x00533023 {
+		t.Errorf("sd t0,0(t1) = %#08x, want 0x00533023", got)
+	}
+}
+
+// TestPagingGuestEncoding decodes the generated paging payload and asserts its
+// structure: it builds vsatp = Sv39<<60 | (vsRootGPA>>12), loads it into satp
+// and fences, then stores+loads a sentinel and branches (bne) past the success
+// print to the shutdown sequence on a mismatch. A wrong vsatp or a mis-scrambled
+// branch is the "silent guest fault" class; QEMU then proves the H-extension
+// actually translates through it.
+func TestPagingGuestEncoding(t *testing.T) {
+	const vsRootGPA = GuestBase + VSRootOff
+	code := decode(t, PagingGuest("hi", vsRootGPA))
+
+	// prologue: li t0,Sv39; slli t0,t0,60; lui/addi t1,ppn; add t0,t0,t1;
+	// csrw satp,t0; sfence.vma.
+	if op, rd, _, _, imm := fields(code[0]); op != 0x13 || rd != regT0 || imm != SatpSv39 {
+		t.Fatalf("code[0] = %#08x, want li t0,%d (Sv39)", code[0], SatpSv39)
+	}
+	if code[1] != slli(regT0, regT0, 60) {
+		t.Fatalf("code[1] = %#08x, want slli t0,t0,60", code[1])
+	}
+	if got := luiAddiVal(code[2], code[3]); got != int64(uint64(vsRootGPA)>>12) {
+		t.Fatalf("ppn builds %#x, want vsRootGPA>>12 = %#x", got, uint64(vsRootGPA)>>12)
+	}
+	if code[4] != add(regT0, regT0, regT1) {
+		t.Fatalf("code[4] = %#08x, want add t0,t0,t1", code[4])
+	}
+	if code[5] != csrw(csrSatp, regT0) {
+		t.Fatalf("code[5] = %#08x, want csrw satp,t0", code[5])
+	}
+	if code[6] != opSfenceVMA {
+		t.Fatalf("code[6] = %#08x, want sfence.vma", code[6])
+	}
+
+	// The payload ends in the shutdown sequence (li a7,8; ecall; j .).
+	sd := len(code) - 3
+	if op, rd, _, _, imm := fields(code[sd]); op != 0x13 || rd != regA7 || imm != SBIShutdown {
+		t.Fatalf("shutdown = %#08x, want li a7,%d", code[sd], SBIShutdown)
+	}
+	if code[sd+1] != opEcall || code[sd+2] != opJ0 {
+		t.Fatalf("shutdown tail = %#08x %#08x", code[sd+1], code[sd+2])
+	}
+
+	// The sentinel-verify branch is a bne that skips the success print on
+	// mismatch, targeting the shutdown sequence.
+	var found bool
+	for i := 0; i < sd; i++ {
+		if code[i]&0x707f == 0x1063 { // B-type, funct3=1 => bne
+			if tgt := i + bneOff(code[i])/4; tgt != sd {
+				t.Fatalf("bne targets word %d, want shutdown at %d", tgt, sd)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no bne (sentinel verify branch) found")
 	}
 }
 

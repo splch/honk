@@ -22,10 +22,11 @@
 // effects are bare metal here and in vmm_riscv64.s.
 //
 // Scope (honest): one guest, one vCPU (a goroutine pinned to its hart for the
-// run, preemptible via the timer); a single 2 MiB G-stage megapage; SBI Base/
-// TIME/console/shutdown. A real third-party guest image, vsatp paging, virtio
-// device backends, and time-sharing one hart between a vCPU and other honk
-// goroutines land in M13.
+// run, preemptible via the timer); a sized G-stage map (a run of 2 MiB
+// megapages); the guest may enable its own VS-stage Sv39 paging (vsatp); SBI
+// Base/TIME/console/shutdown. A real third-party guest image, virtio device
+// backends, and time-sharing one hart between a vCPU and other honk goroutines
+// land in M13.
 
 //go:build tamago && riscv64
 
@@ -50,11 +51,6 @@ type vcpu struct {
 	hsTP uint64
 	hsG  uint64
 }
-
-// guest layout: the guest sees its RAM at this base (like a real RISC-V machine
-// at 0x80000000); honk backs it with a 2 MiB-aligned host buffer via the
-// single G-stage megapage.
-const guestBase = 0x8000_0000
 
 // sstatus / hstatus bit positions honk toggles around the world switch.
 const (
@@ -219,35 +215,56 @@ func reportGuestFault(cause, pc uint64) {
 	putStr("\n")
 }
 
-// RunGuest loads code into a fresh guest, runs it in VS-mode under H-extension
-// two-stage translation, delivers its timer, and emulates its SBI calls until
-// it halts (or faults, or exceeds its time budget), returning a human-readable
-// reason. Guest console output appears inline on honk's console.
-//
-// The G-stage tables and guest RAM are allocated here (which may GC, hence
-// before the run); their backing must outlive the run, which the trailing
-// KeepAlive guarantees against the GC, since the run reaches them only through
-// physical addresses it cannot see. The run itself is runGuest.
+// RunGuest runs an M11/M12 payload: one 2 MiB megapage of RAM, no VS-stage
+// paging. It runs the guest in VS-mode under H-extension two-stage translation,
+// delivers its timer, and emulates its SBI calls until it halts (or faults, or
+// exceeds its time budget). Guest console output appears inline on honk's
+// console.
 func RunGuest(code []byte) string {
-	if len(code) > vmm.MegapageSize {
-		return fmt.Sprintf("guest too large (%d bytes > %d)", len(code), vmm.MegapageSize)
-	}
+	return runGuestImage(code, vmm.MegapageSize, nil)
+}
 
-	// One 2 MiB megapage backs the guest's RAM; honk is identity-mapped, so each
-	// buffer's address is its physical address.
+// RunPagingGuest runs a guest that enables its own VS-stage Sv39 paging. It gets
+// two megapages of RAM (so honk's G-stage maps more than one megapage) and an
+// identity VS-stage page table honk seeds into that RAM for the guest to load
+// into vsatp - proving two-stage (VS + G) translation end to end.
+func RunPagingGuest(code []byte) string {
+	const ramSize = 2 * vmm.MegapageSize
+	return runGuestImage(code, ramSize, func(ram []byte) {
+		vmm.WriteVSStage(
+			ram[vmm.VSRootOff:vmm.VSRootOff+vmm.PageTableSize],
+			ram[vmm.VSL1Off:vmm.VSL1Off+vmm.PageTableSize],
+			vmm.GuestBase+vmm.VSL1Off, vmm.GuestBase, ramSize)
+	})
+}
+
+// runGuestImage allocates ramSize bytes of guest RAM (2 MiB-aligned so its
+// megapages are leaf-aligned), copies code to its base, lets seed (if any)
+// initialize the rest of guest RAM (e.g. seed VS-stage page tables), builds the
+// G-stage map over the whole RAM, and runs the guest.
+//
+// The G-stage tables and RAM are allocated here (which may GC, hence before the
+// run) and are reached during the run only through physical addresses it cannot
+// see, so the trailing KeepAlive pins their Go backing against the GC. honk is
+// identity-mapped, so each buffer's address is its physical address.
+func runGuestImage(code []byte, ramSize int, seed func(ram []byte)) string {
+	if len(code) > ramSize {
+		return fmt.Sprintf("guest too large (%d bytes > %d)", len(code), ramSize)
+	}
 	root := dmaAlloc(vmm.RootSize, vmm.RootSize) // 16 KiB, 16 KiB-aligned
 	l1 := dmaAlloc(vmm.L1Size, vmm.L1Size)       // 4 KiB
-	ram := dmaAlloc(vmm.MegapageSize, vmm.MegapageSize)
+	ram := dmaAlloc(ramSize, vmm.MegapageSize)
 	copy(ram, code)
-	vmm.WriteGStage(root, l1, ptr(root), ptr(l1), ptr(ram), guestBase)
+	if seed != nil {
+		seed(ram)
+	}
+	vmm.WriteGStage(root, l1, ptr(l1), ptr(ram), vmm.GuestBase, uint64(ramSize))
 	fence()
 
 	var r vmRun
-	r.v.pc = guestBase
+	r.v.pc = vmm.GuestBase
 	reason := runGuest(&r, vmm.Hgatp(ptr(root)))
 
-	// The guest reached root/l1/ram only via physical addresses (in hgatp), so
-	// keep their Go backing alive until the run is done.
 	runtime.KeepAlive(root)
 	runtime.KeepAlive(l1)
 	runtime.KeepAlive(ram)

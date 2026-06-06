@@ -643,14 +643,48 @@ assembler (`encode.go`) and the timer guest.
   arm → HS timer → inject `hvip.VSTIP` → guest handler → reprogram → halt) is
   proven. Shell: `vm timer`.
 
-**Honest scope.** Still one guest, one vCPU, a single 2 MiB G-stage megapage,
-and a payload honk controls; the SBI surface is Base/TIME/console/shutdown.
-Loading a real third-party guest image, VS-stage paging (`vsatp`), PLIC/AIA +
-virtio device backends, virtio-fs, and time-sharing one hart between a vCPU and
-other honk goroutines land in M13.
+**Honest scope.** Still one guest, one vCPU, and a payload honk controls; the
+SBI surface is Base/TIME/console/shutdown. Loading a real third-party guest
+image, PLIC/AIA + virtio device backends, virtio-fs, and time-sharing one hart
+between a vCPU and other honk goroutines land in M13.
+
+## Toward M13: two-stage guest paging - how it works
+
+M13 (a real guest) needs two mechanisms M12 deferred: a G-stage map larger than
+one megapage, and the guest running its **own** VS-stage paging. Both are now in
+place, proven against a hand-rolled guest (the M11/M12 discipline). The encodable
+logic is the host-tested `kernel/vmm`; the world switch and RAM/G-stage setup are
+`board/virt`.
+
+- **A sized, multi-megapage G-stage map.** `vmm.WriteGStage` now maps a region of
+  any size as a run of 2 MiB megapages (one shared `mapMegapages` helper owns the
+  layout for both the Sv39x4 G-stage and the Sv39 VS-stage builders; the unused
+  `rootPA` parameter is gone). `board/virt` sizes guest RAM per run -
+  `RunPagingGuest` gives the guest two megapages so the multi-leaf path is
+  exercised.
+- **The guest's own VS-stage Sv39 paging (`vsatp`).** honk seeds an identity
+  VS-stage page table (`vmm.WriteVSStage`; leaves are RWX|A|D with **no U**, since
+  the guest runs in VS-mode/supervisor) into the guest's RAM, then runs
+  `vmm.PagingGuest`: it loads `vsatp` (which aliases `satp` under V=1) with that
+  root, `sfence.vma`s, and now runs under **two-stage** translation - guest
+  virtual -> (VS-stage, guest's tables) -> guest physical -> (G-stage) ->
+  supervisor physical. To prove the map is live (not just that the fetch after
+  `csrw satp` survived), the guest stores a sentinel through a virtual address in
+  the *second* megapage and reads it back, printing its success line only if it
+  round-trips; a wrong map faults instead. honk does not set `hstatus.VTVM`, so
+  the guest's `satp`/`sfence.vma` are its own to run.
+- **Proof.** `go test -race ./kernel/vmm` checks the sized G-stage leaves (one per
+  megapage, U set), the VS-stage identity leaves (U clear), and decodes
+  `PagingGuest` (the `vsatp` build, `sfence.vma`, and the sentinel round-trip +
+  branch). The smoke test runs `vm paging` under `-cpu rv64,h=true` and asserts
+  the guest's post-paging line then SBI shutdown - so the whole chain (seed VS
+  table -> guest enables `vsatp` -> two-stage fetch + load/store -> SBI ->
+  halt) is proven. Shell: `vm paging`.
 
 ## Next: M13
 
 A real guest (Linux): a full guest device tree, PLIC/AIA + virtio device
 backends, and virtio-fs so the guest transparently mounts honk's files - the
-escape hatch for the long tail of real software.
+escape hatch for the long tail of real software. The remaining mechanism gaps
+are device/interrupt-controller emulation and time-sharing a hart between a vCPU
+and other honk goroutines (the run loop is still one non-descheduling region).

@@ -16,6 +16,7 @@ const (
 	regZero = 0  // x0:  hardwired zero
 	regT0   = 5  // x5:  temporary
 	regT1   = 6  // x6:  temporary
+	regT2   = 7  // x7:  temporary (the paging guest's load destination)
 	regS0   = 8  // x8:  saved (survives the guest's own trap, used as a counter)
 	regA0   = 10 // x10: SBI arg0 / return value
 	regA1   = 11 // x11: SBI arg1 / return value
@@ -25,10 +26,11 @@ const (
 
 // Whole-instruction encodings with no operands.
 const (
-	opEcall = 0x00000073 // ecall:   environment call (from VS-mode -> HS, scause 10)
-	opWFI   = 0x10500073 // wfi:     wait for interrupt
-	opSret  = 0x10200073 // sret:    return from an S/VS-mode trap
-	opJ0    = 0x0000006f // jal x0,0: an infinite self-loop ("j .")
+	opEcall     = 0x00000073 // ecall:   environment call (from VS-mode -> HS, scause 10)
+	opWFI       = 0x10500073 // wfi:     wait for interrupt
+	opSret      = 0x10200073 // sret:    return from an S/VS-mode trap
+	opSfenceVMA = 0x12000073 // sfence.vma x0,x0: flush the (VS-stage, under V=1) TLB
+	opJ0        = 0x0000006f // jal x0,0: an infinite self-loop (".")
 )
 
 // CSR numbers the guests read/write. Under V=1 the standard supervisor CSR
@@ -38,6 +40,7 @@ const (
 	csrSstatus = 0x100
 	csrSie     = 0x104
 	csrStvec   = 0x105
+	csrSatp    = 0x180 // satp; under V=1 this aliases to vsatp (the guest's paging)
 	csrTime    = 0xc01
 )
 
@@ -98,6 +101,26 @@ func beq(rs1, rs2, off int) uint32 {
 	u := uint32(off)
 	return (u>>12&1)<<31 | (u>>5&0x3f)<<25 | uint32(rs2)<<20 | uint32(rs1)<<15 |
 		(u>>1&0xf)<<8 | (u>>11&1)<<7 | 0x63
+}
+
+// bne encodes `bne rs1, rs2, off` (B-type, opcode=0x63, funct3=1): the same
+// immediate scramble as beq, branching when rs1 != rs2.
+func bne(rs1, rs2, off int) uint32 {
+	u := uint32(off)
+	return (u>>12&1)<<31 | (u>>5&0x3f)<<25 | uint32(rs2)<<20 | uint32(rs1)<<15 |
+		(u>>1&0xf)<<8 | (u>>11&1)<<7 | 1<<12 | 0x63
+}
+
+// ld encodes `ld rd, off(rs1)` (I-type load doubleword: funct3=3, opcode=0x03).
+func ld(rd, rs1, off int) uint32 {
+	return uint32(off&0xfff)<<20 | uint32(rs1)<<15 | 3<<12 | uint32(rd)<<7 | 0x03
+}
+
+// sd encodes `sd rs2, off(rs1)` (S-type store doubleword: funct3=3, opcode=0x23);
+// the immediate is split imm[11:5] (bits 31:25) and imm[4:0] (bits 11:7).
+func sd(rs2, rs1, off int) uint32 {
+	u := uint32(off)
+	return (u>>5&0x7f)<<25 | uint32(rs2)<<20 | uint32(rs1)<<15 | 3<<12 | (u&0x1f)<<7 | 0x23
 }
 
 // loadImm32 builds rd = v for a 32-bit value whose bit 31 is clear, as

@@ -511,6 +511,12 @@ is front-loaded; the OS logic on top of it is small because it is Go.
     virtio-fs/blk/net backends; boot a Linux guest that transparently mounts
     honk's files over virtio-fs - the escape hatch for the long tail of real
     software.
+    - *Groundwork (in progress):* the two paging mechanisms M12 deferred are
+      done and proven against a hand-rolled guest - a sized, multi-megapage
+      G-stage map, and the guest running its **own** VS-stage Sv39 paging
+      (`vsatp`) for genuine two-stage translation. Shell `vm paging`. Remaining
+      for M13: device/interrupt-controller backends and time-sharing a hart.
+      See `docs/STATUS.md`.
 
 ---
 
