@@ -174,8 +174,8 @@ ordinary Go: capabilities are just interface values you do or do not pass.
 | Concern | Reuse |
 |---|---|
 | Runtime, GC, goroutine scheduler, full stdlib, S-mode support | TamaGo (`tamago-go`, `tamago/riscv64` incl. `InitSupervisor`) |
-| TCP/IP (gVisor) -> stdlib `net` | `usbarmory/go-net` |
-| virtqueue framework + mmio/pci transports + virtio-net | `tamago/kvm/virtio`, `go-net/virtio` |
+| TCP/IP (gVisor) -> stdlib `net` | `usbarmory/go-net` (`gnet`; links on riscv64) |
+| virtqueue framework + mmio/pci transports | `tamago/kvm/virtio` is amd64-only on this version, so honk uses its **own** virtio-mmio transport (`board/virt/virtio.go`); the virtio-net + virtio-blk **drivers** are honk's |
 | Untrusted-code WASM sandbox | `wazero` (interpreter mode) |
 | TLS/HTTP/SSH/DNS/crypto/post-quantum KEM/JSON/image | Go stdlib + `golang.org/x/{crypto,image}` |
 | Shell/terminal | `tamago-example/shell` |
@@ -361,6 +361,21 @@ is front-loaded; the OS logic on top of it is small because it is Go.
 **Phase C - the everyday networked OS**
 7. **M6 Networking.** virtio-net + gVisor; SSH/HTTP/HTTPS, `/pprof`, `/statsviz`;
    DNS/NTP; `crypto/mlkem` demo. *Networked appliance complete.*
+   - *Status:* **COMPLETE + verified.** honk's own virtio-net driver
+     (`board/virt/virtionet.go`, on a shared virtio-mmio v2 transport
+     `board/virt/virtio.go` now used by both virtio-blk and virtio-net) is a
+     `go-net` `NetworkDevice`; `gnet.NewGVisorStack` is the stack; `net.SocketFunc
+     = stack.Socket` lights up the stdlib `net` package, and honk serves
+     `net/http` on `:80`. Verified end to end in QEMU (a host `curl` through
+     SLIRP `hostfwd` reaches the server: driver -> gVisor -> stdlib
+     `net.Listener`), gated by the smoke test. A compile/link **spike retired the
+     #1 risk first**: gVisor links on `GOOS=tamago GOARCH=riscv64`. The spike
+     also found `go-net/virtio`'s device driver is amd64-only (its PCI transport
+     imports `tamago/amd64`/`soc/intel/pci`), so honk supplies its own driver on
+     its existing virtio-mmio transport - no `tamago/dma`, one `dmaAlloc`. The
+     stdlib HTTP/TLS pull-in grows the image ~3 MB -> ~11 MB (the cost of the
+     reuse; LoC stays small). SSH, DNS/NTP, `/pprof`, `crypto/mlkem` build on
+     this. See `docs/STATUS.md`.
 8. **M7 WASM/WASI tier.** Embed wazero; run WASI Preview 1 modules from any
    toolchain; route every WASI call through a capability check (implementing !=
    granting); epoch/`context` termination. `run app.wasm`. (Path to WASI Preview

@@ -24,8 +24,8 @@ env -u GOOS -u GOARCH -u GOOSPKG go run ./tools/mkimage -version 2 kernel/core "
 env -u GOOS -u GOARCH -u GOOSPKG go run ./tools/mkimage -version 1 kernel/core "$BIMG" >/dev/null
 
 NVME="$(mktemp)" RNVME="$(mktemp)" VB="$(mktemp)" AB="$(mktemp)"
-A="$(mktemp)" P="$(mktemp)" B="$(mktemp)" R="$(mktemp)" S1="$(mktemp)" S2="$(mktemp)"
-trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$AIMG" "$BIMG"' EXIT
+A="$(mktemp)" P="$(mktemp)" B="$(mktemp)" R="$(mktemp)" S1="$(mktemp)" S2="$(mktemp)" N="$(mktemp)"
+trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$N" "$AIMG" "$BIMG"' EXIT
 dd if=/dev/zero of="$NVME" bs=1048576 count=16 2>/dev/null
 dd if=/dev/zero of="$VB" bs=1048576 count=16 2>/dev/null
 
@@ -122,6 +122,42 @@ printf '\377' | dd of="$AB" bs=1 seek=0 conv=notrunc 2>/dev/null # corrupt slot 
 boot $'\nexit\n' "$S2" "${abnvme[@]}"
 want "$S2" "A/B fallback" <<'EOF'
 core verified - slot B v1
+EOF
+
+# Run N: networking (M6). Boot with a virtio-net device whose :80 is forwarded
+# to a host port; once honk's httpd is up, curl it from the host. This exercises
+# honk's virtio-net driver, the gVisor stack, and stdlib net/http end to end -
+# hermetic (no external network needed). The guest is left running (no `exit`)
+# while we poll, then SIGKILLed.
+NETPORT="${NETPORT:-18080}"
+NNVME="$(mktemp)"
+dd if=/dev/zero of="$NNVME" bs=1048576 count=16 2>/dev/null
+printf '\n' |
+	qemu-system-riscv64 -machine virt -global virtio-mmio.force-legacy=false \
+		-cpu rv64,h=true -smp "$SMP" -m 512M -nographic -bios default -no-reboot \
+		-kernel boot.bin -device loader,file=honk.elf \
+		-drive "file=$NNVME,if=none,id=nvm,format=raw" -device nvme,serial=honk,drive=nvm \
+		-netdev "user,id=n0,hostfwd=tcp::${NETPORT}-:80" -device virtio-net-device,netdev=n0 \
+		>"$N" 2>&1 &
+nqpid=$!
+( sleep "$WATCHDOG"; kill -9 "$nqpid" 2>/dev/null ) &
+nwpid=$!
+httpbody=""
+for i in $(seq 1 12); do
+	httpbody="$(curl -sS --max-time 3 "http://localhost:${NETPORT}/" 2>/dev/null || true)"
+	printf '%s' "$httpbody" | grep -qF "pure-Go RISC-V64 OS" && break
+	sleep 1
+done
+kill -9 "$nqpid" 2>/dev/null || true
+wait "$nqpid" 2>/dev/null || true
+kill "$nwpid" 2>/dev/null || true
+rm -f "$NNVME"
+printf '%s' "$httpbody" | grep -qF "pure-Go RISC-V64 OS" ||
+	{ echo "SMOKE FAIL (net): no HTTP 200 body from honk httpd" >&2; cat "$N"; exit 1; }
+want "$N" "net" <<'EOF'
+storage = NVMe
+net up  ip=10.0.2.15/24  gw=10.0.2.2
+httpd serving on :80
 EOF
 
 echo "----------------------------------------"

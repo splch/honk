@@ -48,6 +48,10 @@ func main() {
 	virt.InitStorage()
 	mountFS()
 
+	// Bring up networking (M6): virtio-net + the gVisor stack, lighting up the
+	// stdlib net package, and an HTTP status server. No-op without a NIC.
+	InitNet()
+
 	// Prove the scheduler actually runs goroutines across multiple harts.
 	harts := smpDemo(nharts)
 	if len(harts) > 1 {

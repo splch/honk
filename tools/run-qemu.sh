@@ -6,8 +6,10 @@
 #
 #   MEM   QEMU RAM size   (default 512M; any size works - sized from the DTB)
 #   SMP   number of harts (default 4)
+#   HTTP  host port forwarded to honk's :80 httpd (default 8080)
 #
 # Quit an interactive session with Ctrl-A then x.
+# With the defaults, `curl http://localhost:8080/` reaches honk's HTTP server.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -35,4 +37,6 @@ exec qemu-system-riscv64 \
 	-drive file="$NVME",if=none,id=nvm,format=raw \
 	-device nvme,serial=honk,drive=nvm \
 	-drive file="$DISK",if=none,id=blk0,format=raw \
-	-device virtio-blk-device,drive=blk0
+	-device virtio-blk-device,drive=blk0 \
+	-netdev "user,id=n0,hostfwd=tcp::${HTTP:-8080}-:80" \
+	-device virtio-net-device,netdev=n0

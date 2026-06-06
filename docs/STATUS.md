@@ -8,7 +8,7 @@ Living record of what is implemented and verified, and what is next. See
 ```sh
 make run        # build + boot under QEMU virt (Ctrl-A x to quit)
 make test       # host race tests of every pure-Go package
-make smoke      # build + boot + assert M0-M5 output (CI gate)
+make smoke      # build + boot + assert M0-M6 output (CI gate)
 make phase-a    # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
 make vet        # go vet under the tamago toolchain
 ```
@@ -56,7 +56,9 @@ M0-M5 smoke test. The split is by where the authority for correctness lives:
 | **M4 KV store + VFS** | ✅ **complete** | Crash-safe log-structured KV (`kernel/kv`) over `block.Device` - single-appender group commit, lock-free COW snapshot reads, double-buffered superblock, atomic-checkpoint compaction, replay-to-sequence-floor (safe region reuse). **Durable by default** (each batch flushes before ack; compaction flushes the region before the superblock switch, so the checkpoint is host-crash-safe). **Hybrid value store:** small values inline in memory, larger ones disk-resident (index holds a verified pointer), so the store is not RAM-bounded. Exposed as `io/fs.FS` (`kernel/vfs`) overlaid on the embedded core; `ls`/`cat`/`cp`/`put`/`rm` shell. Host race-tested (torn-tail, region-reuse leftovers, compaction, disk-resident, a 600-op crash-consistency property test, `fstest.TestFS` incl. the overlay), reboot persistence verified in QEMU. |
 | **M5 immutable core** | ✅ **complete** | Signed, Merkle-tree'd core image (`kernel/image`): a header with the SHA-256 Merkle root, an anti-rollback security version, and a file-table hash, signed with Ed25519. Boot `Verify`s the signature against an abstract **anchor** (QEMU = embedded dev key; silicon = OTP-fused key + monotonic counter behind the same interface), the version floor, the table hash, the Merkle root, and per-file bounds - failing closed. The device is partitioned (`block.Slice`) into **A/B image slots + the kv region**; boot `Select`s the highest valid version and falls back across the rest, with the embedded factory image as the guaranteed-good last candidate. The verified core is served read-only (`vfs.FilesFS`) under the writable kv overlay. **Stateless reset** (`kv.Reset`, shell `reset --confirm`) clears the writable layer crash-safely. `tools/mkimage` builds/signs images. Host race-tested (build/verify, tamper, anti-rollback, A/B + fallback, slot I/O); QEMU-verified (verification, A/B select + fallback, reset). |
 
-**Phase A complete; Phase B (storage) complete.** Next: M6 networking (virtio-net + gVisor) - Phase C, the networked appliance.
+| **M6 networking** | ✅ **complete** | **virtio-net + the gVisor TCP/IP stack**, lighting up the stdlib `net` package. honk's own virtio-net driver (`board/virt/virtionet.go`, on the shared virtio-mmio transport `virtio.go`) is a `go-net` `NetworkDevice`; `gnet.NewGVisorStack` is the stack; `net.SocketFunc = stack.Socket` makes `net.Dial`/`Listen` - and thus `net/http`, `crypto/tls`, etc. - work unchanged. honk serves an HTTP status page on `:80`. QEMU-verified end to end: a host `curl` through SLIRP `hostfwd` reaches honk's `net/http` server (driver -> gVisor -> stdlib `net.Listener`), gated by the smoke test. The gVisor reuse was de-risked by a compile/link spike (gVisor links on `GOOS=tamago GOARCH=riscv64`); `go-net/virtio` is amd64-only, so honk supplies its own driver. |
+
+**Phase A complete; Phase B (storage) complete; Phase C started (M6 complete).** Next: M7 WASM/WASI tier (wazero).
 
 ## What boots today (M0+M1)
 
@@ -349,9 +351,45 @@ A/B selection + fallback, and slot read/write. The QEMU smoke test seeds two
 slots to verify selection of the newer image and fallback when it is corrupted,
 and exercises `reset`.
 
-## Next: M6
+## Networking (M6) - how it works
 
-Networking: virtio-net + the gVisor stack (`go-net`), `net.SocketFunc =
-stack.Socket` lighting up the stdlib `net` package -> HTTP/HTTPS, SSH, DNS/NTP,
-`/pprof` and `/statsviz`, a `crypto/mlkem` demo. That completes the networked
-appliance (Phase C).
+`kernel/net.go` brings up TCP/IP by *reusing* a stack, not writing one (HONK.md
+§1): the gVisor netstack via `usbarmory/go-net` (`gnet`), driven by honk's own
+virtio-net driver, exposed through the stdlib `net` package.
+
+- **Driver (`board/virt/virtionet.go`).** A split-virtqueue virtio-net device on
+  honk's shared virtio-mmio v2 transport (`board/virt/virtio.go`, now the single
+  owner of the register map + handshake for both virtio-blk and virtio-net). It
+  exposes exactly what `gnet.NetworkDevice` needs - `Receive`/`Transmit` of raw
+  Ethernet frames - plus the device MAC. The receive queue is pre-filled with
+  device-writable buffers and polled (recycled on each `Receive`); transmit is
+  synchronous and serialized. Polled, not IRQ-driven, matching honk's deferred
+  async-I/O model; no `tamago/dma` - honk's one `dmaAlloc` mechanism serves it.
+- **Stack + stdlib bridge.** `gnet.NewGVisorStack(1)` over a `gnet.Interface`
+  whose receive pump (`Receive` -> `RecvInboundPacket`) runs as a goroutine.
+  honk configures the QEMU SLIRP address statically (`10.0.2.15/24`, gw
+  `10.0.2.2`) and sets `net.SocketFunc = stack.Socket`, so `net.Dial`/`Listen`,
+  `net/http`, and `crypto/tls` work unchanged. `EnableICMP` answers pings.
+- **Proof.** honk runs a stdlib `net/http` server on `:80`. The smoke test boots
+  with a virtio-net device whose `:80` is `hostfwd`'d to a host port and `curl`s
+  it - hermetic (no external network), exercising driver -> gVisor -> stdlib
+  `net` -> `net/http` end to end. Shell: `net` reports the interface.
+
+**De-risking note.** gVisor on `GOOS=tamago GOARCH=riscv64` was the milestone's
+#1 risk (it is large and arch-specific). A compile/link spike confirmed it links
+on riscv64 *before* any honk code was written; the spike also found `go-net`'s
+own `virtio` device driver is amd64-only (its PCI transport imports
+`tamago/amd64`), which is why honk implements the `NetworkDevice` on its own
+virtio-mmio transport instead.
+
+**Honest caveat.** Pulling in `net/http` + `crypto/tls` + gVisor grows the kernel
+image substantially (~3 MB -> ~11 MB) - the cost of the stdlib + gVisor reuse
+(the point of the milestone); LoC stays tiny. Outbound TLS/HTTP, SSH, DNS/NTP,
+`/pprof`, `/statsviz`, and a `crypto/mlkem` demo are the obvious next additions
+on this foundation.
+
+## Next: M7
+
+WASM/WASI tier: embed wazero, run WASI Preview 1 modules from any toolchain,
+route every WASI call through a capability check (implementing != granting),
+epoch/`context` termination. `run app.wasm`.
