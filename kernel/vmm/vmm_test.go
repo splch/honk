@@ -171,6 +171,33 @@ func TestWriteVSStage(t *testing.T) {
 	}
 }
 
+// TestGuestRange pins the bounds discipline honk's device emulation depends on:
+// a guest-physical range is accepted only if it lies wholly within the guest's
+// RAM, and a bad pointer (before base, past the end, length overflow) is
+// refused rather than read out of bounds. This is the keystone check every
+// backend that follows a guest pointer reuses, so its edges are tested here.
+func TestGuestRange(t *testing.T) {
+	const base, size = 0x8000_0000, 0x20_0000 // 2 MiB of guest RAM
+
+	check := func(name string, gpa, length uint64, wantStart, wantEnd uint64, wantOK bool) {
+		t.Helper()
+		start, end, ok := GuestRange(gpa, length, base, size)
+		if ok != wantOK || (ok && (start != wantStart || end != wantEnd)) {
+			t.Fatalf("%s: GuestRange(%#x,%#x) = (%#x,%#x,%v), want (%#x,%#x,%v)",
+				name, gpa, length, start, end, ok, wantStart, wantEnd, wantOK)
+		}
+	}
+
+	check("in range", base+0x400, 4, 0x400, 0x404, true)
+	check("at base", base, 16, 0, 16, true)
+	check("exact end", base+size-8, 8, size-8, size, true) // ends exactly at RAM end
+	check("zero length", base+0x1000, 0, 0, 0, true)       // empty: valid
+	check("below base", base-1, 4, 0, 0, false)
+	check("past end", base+size-2, 4, 0, 0, false) // straddles the end
+	check("far above", base+size+0x1000, 4, 0, 0, false)
+	check("length overflow", base+0x1000, ^uint64(0), 0, 0, false) // start+length wraps
+}
+
 // TestHgatp checks the hgatp value selects Sv39x4 and encodes the root PPN.
 func TestHgatp(t *testing.T) {
 	const rootPA = 0x9000_0000
@@ -180,6 +207,75 @@ func TestHgatp(t *testing.T) {
 	}
 	if ppn := (h & ((1 << 44) - 1)); ppn != rootPA>>12 {
 		t.Fatalf("hgatp PPN = %#x, want %#x", ppn, uint64(rootPA)>>12)
+	}
+}
+
+// TestDBCNGuestEncoding decodes the generated DBCN payload and asserts its
+// structure: it probes SBI Base for the DBCN EID and branches to shutdown on
+// absence, builds + stores the "dbcn" token into its own RAM, then issues a DBCN
+// console_write (a7=DBCN EID, a6=write FID) before shutting down. A wrong EID,
+// FID, or branch target is the "silent guest fault" class; QEMU then proves honk
+// actually reads the buffer back through the G-stage.
+func TestDBCNGuestEncoding(t *testing.T) {
+	const token = 'd' | 'b'<<8 | 'c'<<16 | 'n'<<24
+	code := decode(t, DBCNGuest())
+
+	// probe: li a7,Base; li a6,probe; loadImm32 a0,DBCN; ecall; beq a1,x0,shutdown.
+	if op, rd, _, _, imm := fields(code[0]); op != 0x13 || rd != regA7 || imm != SBIExtBase {
+		t.Fatalf("code[0] = %#08x, want li a7,%#x (Base)", code[0], SBIExtBase)
+	}
+	if op, rd, _, _, imm := fields(code[1]); op != 0x13 || rd != regA6 || imm != SBIBaseProbeExtension {
+		t.Fatalf("code[1] = %#08x, want li a6,%d (probe)", code[1], SBIBaseProbeExtension)
+	}
+	if got := luiAddiVal(code[2], code[3]); got != int64(SBIExtDBCN) {
+		t.Fatalf("probe a0 builds %#x, want DBCN EID %#x", got, SBIExtDBCN)
+	}
+	if code[4] != opEcall {
+		t.Fatalf("code[4] = %#08x, want ecall", code[4])
+	}
+
+	// shutdown sequence (li a7,8; ecall; j .) at the tail.
+	sd := len(code) - 3
+	if op, rd, _, _, imm := fields(code[sd]); op != 0x13 || rd != regA7 || imm != SBIShutdown {
+		t.Fatalf("shutdown = %#08x, want li a7,%d", code[sd], SBIShutdown)
+	}
+	if code[sd+1] != opEcall || code[sd+2] != opJ0 {
+		t.Fatalf("shutdown tail = %#08x %#08x", code[sd+1], code[sd+2])
+	}
+	// the probe branch (code[5]) targets the shutdown sequence on DBCN absence.
+	if code[5]&0x707f != 0x0063 { // B-type, funct3=0 => beq
+		t.Fatalf("code[5] = %#08x, want beq (probe-fail branch)", code[5])
+	}
+	if tgt := 5 + beqOff(code[5])/4; tgt != sd {
+		t.Fatalf("probe-fail branch targets word %d, want shutdown at %d", tgt, sd)
+	}
+
+	// the token "dbcn" is built (lui+addi) and the DBCN write call sets a7=DBCN
+	// EID (lui+addi) immediately followed by a6=write FID. Match only real
+	// lui+addi pairs so the value reconstruction can't coincide on other words.
+	isLUI := func(w uint32) bool { return w&0x7f == 0x37 }
+	isADDI := func(w uint32) bool { return w&0x707f == 0x13 }
+	var storedToken, wroteDBCN bool
+	for i := 6; i+1 < sd; i++ {
+		if !isLUI(code[i]) || !isADDI(code[i+1]) {
+			continue
+		}
+		switch luiAddiVal(code[i], code[i+1]) {
+		case int64(token):
+			storedToken = true
+		case int64(SBIExtDBCN):
+			if i+2 < sd {
+				if op, rd, _, _, imm := fields(code[i+2]); op == 0x13 && rd == regA6 && imm == SBIDBCNWrite {
+					wroteDBCN = true
+				}
+			}
+		}
+	}
+	if !storedToken {
+		t.Fatal("the 'dbcn' token is never built (no lui+addi of it)")
+	}
+	if !wroteDBCN {
+		t.Fatal("no DBCN console_write call (lui+addi a7,DBCN; li a6,write) found")
 	}
 }
 

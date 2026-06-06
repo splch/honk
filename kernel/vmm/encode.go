@@ -20,6 +20,7 @@ const (
 	regS0   = 8  // x8:  saved (survives the guest's own trap, used as a counter)
 	regA0   = 10 // x10: SBI arg0 / return value
 	regA1   = 11 // x11: SBI arg1 / return value
+	regA2   = 12 // x12: SBI arg2 (e.g. DBCN console_write base_addr_hi)
 	regA6   = 16 // x16: SBI function id (FID)
 	regA7   = 17 // x17: SBI extension id (EID)
 )

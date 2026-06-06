@@ -142,6 +142,34 @@ func WriteVSStage(root, l1 []byte, l1PA, guestBase, size uint64) {
 // runs one guest at a time).
 func Hgatp(rootPA uint64) uint64 { return HgatpSv39x4<<60 | rootPA>>12 }
 
+// GuestRange validates that the guest-physical range [gpa, gpa+length) lies
+// within the guest's RAM [base, base+ramSize) and returns the matching offsets
+// into the host buffer that backs that RAM (host index = gpa - base, since
+// honk's G-stage maps guest RAM as one contiguous region). ok is false for a
+// range that starts below base, runs past the end, or overflows - so the host
+// emulator refuses a guest's bad pointer instead of reading out of bounds.
+//
+// This is the bounds discipline every device backend that follows a guest
+// pointer (DBCN console, and the virtio backends to come) needs, so it lives
+// once here and is host-tested against adversarial inputs. It is //go:nosplit
+// because the emulator calls it from the non-descheduling guest-run region.
+//
+//go:nosplit
+func GuestRange(gpa, length, base, ramSize uint64) (start, end uint64, ok bool) {
+	if length == 0 {
+		return 0, 0, true // empty range: valid, nothing to access
+	}
+	if gpa < base {
+		return 0, 0, false
+	}
+	start = gpa - base
+	end = start + length
+	if end < start || end > ramSize { // length overflow, or past the end of RAM
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
 // The guest payloads are hand-rolled VS-mode programs honk fully controls, so
 // each milestone proves the H-extension mechanism against code it can decode
 // and host-test (the instruction encoders live in encode.go, the SBI numbers in
@@ -307,6 +335,57 @@ func PagingGuest(msg string, vsRootGPA uint64) []byte {
 	emit(opJ0) // guard against a missed stop
 
 	ins[failBranch] = bne(regT2, regT0, (shutdownIdx-failBranch)*4)
+	return assemble(ins)
+}
+
+// DBCNGuest builds a guest that proves honk can read a guest-supplied buffer
+// from guest memory through the G-stage - the keystone for device backends,
+// which all follow guest pointers. It probes the SBI DBCN (debug console)
+// extension, writes the token "dbcn" into its own RAM with a store, then calls
+// DBCN console_write with that buffer's guest-physical address and length - so
+// honk translates the address, reads the bytes the guest wrote, and prints
+// them. If DBCN is unsupported it shuts down without printing, so the printed
+// token is the end-to-end proof.
+func DBCNGuest() []byte {
+	// "dbcn" as one little-endian 32-bit value (bit 31 clear, so loadImm32 builds
+	// it); stored as a doubleword, its low 4 bytes are the message honk reads.
+	const token = 'd' | 'b'<<8 | 'c'<<16 | 'n'<<24
+	const msgOff = 0x400 // buffer offset in guest RAM, clear of the (tiny) code
+	const msgLen = 4
+
+	var ins []uint32
+	emit := func(words ...uint32) { ins = append(ins, words...) }
+
+	// Probe SBI Base for DBCN; if absent, skip straight to shutdown.
+	emit(addi(regA7, regZero, SBIExtBase))
+	emit(addi(regA6, regZero, SBIBaseProbeExtension))
+	emit(loadImm32(regA0, SBIExtDBCN)...) // a0 = the EID being probed
+	emit(opEcall)
+	probeBranch := len(ins)
+	emit(0) // beq a1, x0, shutdown  (patched)
+
+	// Build the buffer address a1 = GuestBase|msgOff (a2 = 0: the high half) and
+	// store the token there, in the guest's own RAM.
+	emit(addi(regA1, regZero, 1))
+	emit(slli(regA1, regA1, 31)) // a1 = GuestBase (0x8000_0000)
+	emit(addi(regT0, regZero, msgOff))
+	emit(add(regA1, regA1, regT0)) // a1 = msgGPA
+	emit(loadImm32(regT0, token)...)
+	emit(sd(regT0, regA1, 0)) // guest RAM[msgGPA..] = "dbcn\0\0\0\0"
+
+	// DBCN console_write(a0=len, a1=base_lo, a2=base_hi): honk reads the buffer.
+	emit(addi(regA0, regZero, msgLen))
+	emit(addi(regA2, regZero, 0))
+	emit(loadImm32(regA7, SBIExtDBCN)...)
+	emit(addi(regA6, regZero, SBIDBCNWrite))
+	emit(opEcall)
+
+	shutdownIdx := len(ins)
+	emit(addi(regA7, regZero, SBIShutdown))
+	emit(opEcall)
+	emit(opJ0) // guard against a missed stop
+
+	ins[probeBranch] = beq(regA1, regZero, (shutdownIdx-probeBranch)*4)
 	return assemble(ins)
 }
 

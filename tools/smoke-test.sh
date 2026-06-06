@@ -134,9 +134,13 @@ EOF
 # (vsatp) over honk's (now sized, multi-megapage) G-stage and round-trips a
 # sentinel through a second-megapage virtual address - the printed line appears
 # only if two-stage (VS + G) translation works end to end (a wrong map faults
-# instead). No devices needed; the guest runs from a G-stage-mapped RAM buffer.
-boot $'\nvm\nvm timer\nvm paging\nexit\n' "$VV"
-want "$VV" "vmm/M11+M12+paging" <<'EOF'
+# instead). `vm dbcn` (also M13 groundwork) runs a guest that writes a token
+# into its OWN RAM and asks honk to print it via SBI DBCN console_write with a
+# guest-physical buffer pointer - so "guest console: dbcn" appears only if honk
+# read the guest's buffer back through the G-stage (the keystone for device
+# backends). No devices needed; the guests run from a G-stage-mapped RAM buffer.
+boot $'\nvm\nvm timer\nvm paging\nvm dbcn\nexit\n' "$VV"
+want "$VV" "vmm/M11+M12+paging+dbcn" <<'EOF'
 launching a VS-mode guest
 hello from a guest VM
 guest halted (SBI shutdown)
@@ -144,6 +148,8 @@ launching a timer guest
 guest ticks: *****
 launching a paging guest
 guest enabled VS-stage paging
+launching a dbcn guest
+guest console: dbcn
 EOF
 
 # Run R: stateless reset clears the writable layer; the immutable core remains.

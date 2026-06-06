@@ -20,16 +20,25 @@ const (
 const (
 	SBIExtBase = 0x10       // Base: discovery (probe extensions, versions)
 	SBIExtTime = 0x54494D45 // "TIME": the supervisor timer
+	SBIExtDBCN = 0x4442434E // "DBCN": debug console (buffered, the modern console)
 )
 
 // Function ids within the extensions above.
 const (
 	SBIBaseProbeExtension = 3 // Base: probe_extension(a0=EID) -> 0 absent, !=0 present
 	SBITimeSetTimer       = 0 // TIME: set_timer(a0=absolute time) -> arms the next timer
+
+	// DBCN: console_write(a0=num_bytes, a1=base_addr_lo, a2=base_addr_hi) writes
+	// from a guest-physical buffer and returns the count written; write_byte
+	// (a0=byte) writes one byte. (read, FID 1, is unimplemented - honk has no
+	// guest input yet.)
+	SBIDBCNWrite     = 0
+	SBIDBCNWriteByte = 2
 )
 
 // SBI error codes returned in a0 (a subset; 0 is success).
 const (
 	SBISuccess         = 0
 	SBIErrNotSupported = -2
+	SBIErrInvalidParam = -3 // e.g. a guest console buffer outside its RAM
 )

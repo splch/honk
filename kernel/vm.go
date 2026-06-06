@@ -26,8 +26,11 @@ const timerTicks = 5
 // ticks - proving the timer, interrupt injection, and preemption path. `vm
 // paging` runs the M13-groundwork demo: a guest that enables its own VS-stage
 // Sv39 paging (vsatp) over honk's G-stage and round-trips a value through a
-// second-megapage address - proving two-stage translation. Guest output
-// appears inline on honk's console.
+// second-megapage address - proving two-stage translation. `vm dbcn` runs
+// another M13-groundwork demo: a guest that writes a token into its own RAM and
+// asks honk to print it via the SBI DBCN console - proving honk can read a
+// guest-supplied buffer through the G-stage (the keystone for device backends).
+// Guest output appears inline on honk's console.
 func vmcmd(fields []string) {
 	if len(fields) > 1 && fields[1] == "timer" {
 		guest := vmm.TimerGuest('*', timerTicks)
@@ -44,6 +47,16 @@ func vmcmd(fields []string) {
 		fmt.Printf("vm: launching a paging guest (%d bytes): enables its own Sv39 (vsatp) over honk's G-stage\n",
 			len(guest))
 		fmt.Printf("vm: %s\n", virt.RunPagingGuest(guest))
+		return
+	}
+
+	if len(fields) > 1 && fields[1] == "dbcn" {
+		guest := vmm.DBCNGuest()
+		fmt.Printf("vm: launching a dbcn guest (%d bytes): SBI DBCN console_write from guest memory\n",
+			len(guest))
+		fmt.Print("vm: guest console: ")
+		reason := virt.RunGuest(guest) // the guest's "dbcn" prints inline
+		fmt.Printf("\nvm: %s\n", reason)
 		return
 	}
 

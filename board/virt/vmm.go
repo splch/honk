@@ -122,13 +122,20 @@ func setTimerSBI(t uint64) { sbiCall(vmm.SBIExtTime, vmm.SBITimeSetTimer, t, 0, 
 //go:nosplit
 func sbiErr(code int) uint64 { return uint64(int64(code)) }
 
-// vmRun is one guest run: the vCPU plus the guest's requested timer deadline
-// (in time-CSR ticks; 0 = none pending). It owns the SBI emulation and the
-// HS-timer arming policy so the run loop stays a clean dispatch.
+// vmRun is one guest run: the vCPU, the guest's RAM (so SBI emulation can follow
+// guest pointers, e.g. the DBCN console buffer), and the guest's requested timer
+// deadline (in time-CSR ticks; 0 = none pending). It owns the SBI emulation and
+// the HS-timer arming policy so the run loop stays a clean dispatch.
 type vmRun struct {
 	v        vcpu
+	mem      []byte // the guest's RAM (gpa GuestBase -> mem[0]); see vmm.GuestRange
 	deadline uint64
 }
+
+// dbcnMaxWrite caps one DBCN console_write so a guest cannot make honk spin
+// un-preemptibly inside the nosplit guest-run region on a huge buffer; a guest
+// asking for more gets a spec-compliant partial write and calls again.
+const dbcnMaxWrite = 4096
 
 // armHSTimer programs honk's HS timer for the sooner of the next preemption
 // quantum and the guest's pending deadline, so honk both delivers the guest's
@@ -161,11 +168,45 @@ func (r *vmRun) sbi() (halt bool, reason string) {
 		v.gpr[10], v.gpr[11] = r.sbiBase()
 	case vmm.SBIExtTime:
 		v.gpr[10], v.gpr[11] = r.sbiSetTimer()
+	case vmm.SBIExtDBCN:
+		v.gpr[10], v.gpr[11] = r.sbiDBCN()
 	default:
 		v.gpr[10], v.gpr[11] = sbiErr(vmm.SBIErrNotSupported), 0
 	}
 	v.pc += 4 // step past the ecall (always 4 bytes; there is no c.ecall)
 	return false, ""
+}
+
+// sbiDBCN emulates the debug-console extension. console_write follows the
+// guest's (guest-physical) buffer pointer through the G-stage - via
+// vmm.GuestRange, which refuses a pointer outside the guest's RAM - and prints
+// the bytes the guest placed there; console_write_byte prints one byte. This
+// is honk's first read of guest memory at a guest-supplied address, the
+// mechanism every virtio device backend builds on.
+//
+//go:nosplit
+func (r *vmRun) sbiDBCN() (err, val uint64) {
+	switch r.v.gpr[16] { // a6 = function id
+	case vmm.SBIDBCNWrite:
+		n := r.v.gpr[10] // a0 = num_bytes
+		if n > dbcnMaxWrite {
+			n = dbcnMaxWrite // bounded partial write (keeps this region preemptible)
+		}
+		gpa := r.v.gpr[12]<<32 | r.v.gpr[11] // a2:a1 = base_hi:base_lo
+		start, end, ok := vmm.GuestRange(gpa, n, vmm.GuestBase, uint64(len(r.mem)))
+		if !ok {
+			return sbiErr(vmm.SBIErrInvalidParam), 0
+		}
+		for i := start; i < end; i++ {
+			sbiPutchar(r.mem[i])
+		}
+		return vmm.SBISuccess, n // bytes written
+	case vmm.SBIDBCNWriteByte:
+		sbiPutchar(byte(r.v.gpr[10])) // a0 = byte
+		return vmm.SBISuccess, 0
+	default:
+		return sbiErr(vmm.SBIErrNotSupported), 0
+	}
 }
 
 // sbiBase answers the Base extension: only probe_extension, reporting the calls
@@ -177,7 +218,7 @@ func (r *vmRun) sbiBase() (err, val uint64) {
 		return sbiErr(vmm.SBIErrNotSupported), 0
 	}
 	switch r.v.gpr[10] { // a0 = the extension id being probed
-	case vmm.SBIExtTime, vmm.SBIConsolePutchar, vmm.SBIShutdown:
+	case vmm.SBIExtTime, vmm.SBIExtDBCN, vmm.SBIConsolePutchar, vmm.SBIShutdown:
 		return vmm.SBISuccess, 1 // present
 	default:
 		return vmm.SBISuccess, 0 // absent
@@ -262,6 +303,7 @@ func runGuestImage(code []byte, ramSize int, seed func(ram []byte)) string {
 	fence()
 
 	var r vmRun
+	r.mem = ram // so SBI emulation can follow guest pointers into guest RAM
 	r.v.pc = vmm.GuestBase
 	reason := runGuest(&r, vmm.Hgatp(ptr(root)))
 

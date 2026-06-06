@@ -681,10 +681,41 @@ logic is the host-tested `kernel/vmm`; the world switch and RAM/G-stage setup ar
   table -> guest enables `vsatp` -> two-stage fetch + load/store -> SBI ->
   halt) is proven. Shell: `vm paging`.
 
+## Toward M13: reading guest memory (SBI DBCN) - how it works
+
+Every device backend a real guest needs (virtio console/blk/net/fs) does one
+thing honk could not yet do: **follow a guest-supplied pointer into guest memory
+and read/write it.** That keystone is now in place, introduced via its simplest
+real consumer - the modern buffered console, SBI DBCN.
+
+- **The bounds discipline is pure logic.** `vmm.GuestRange(gpa, length, base,
+  ramSize)` validates that a guest-physical range lies wholly within the guest's
+  RAM and returns the matching offsets into the host buffer that backs it (honk
+  maps guest RAM as one contiguous region, so the host index is `gpa - base`).
+  It refuses a pointer that starts below the base, runs past the end, or
+  overflows - so a guest's bad (or hostile) pointer is rejected, never read out
+  of bounds. It is host-tested against those adversarial edges and is the one
+  check every future backend reuses.
+- **The read is the hardware effect.** honk emulates SBI DBCN `console_write`
+  (`board/virt`): it reconstructs the guest-physical buffer address from
+  `a2:a1`, validates it with `GuestRange`, and prints the bytes from guest RAM -
+  capped per call (`dbcnMaxWrite`) so a guest cannot make honk spin
+  un-preemptibly inside the nosplit guest-run region (a larger request gets a
+  spec-compliant partial write). `console_write_byte` and a Base probe entry for
+  DBCN round out the surface.
+- **Proof.** `go test -race ./kernel/vmm` checks `GuestRange`'s edges and decodes
+  `vmm.DBCNGuest` (probe DBCN, build + store the token, the DBCN write call,
+  shutdown). The smoke test runs `vm dbcn`: the guest writes the token `dbcn`
+  into its *own* RAM and asks honk to print it via a guest-physical pointer, so
+  `guest console: dbcn` appears only if honk read the guest's buffer back
+  through the G-stage. Shell: `vm dbcn`.
+
 ## Next: M13
 
 A real guest (Linux): a full guest device tree, PLIC/AIA + virtio device
 backends, and virtio-fs so the guest transparently mounts honk's files - the
-escape hatch for the long tail of real software. The remaining mechanism gaps
-are device/interrupt-controller emulation and time-sharing a hart between a vCPU
-and other honk goroutines (the run loop is still one non-descheduling region).
+escape hatch for the long tail of real software. The paging (VS-stage + sized
+G-stage) and guest-memory-access (DBCN/`GuestRange`) keystones are in place; the
+remaining mechanism gaps are the interrupt-controller and virtio device backends
+themselves, and time-sharing a hart between a vCPU and other honk goroutines
+(the run loop is still one non-descheduling region).
