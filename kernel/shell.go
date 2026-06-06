@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"runtime"
 	"strconv"
 	"strings"
@@ -60,6 +61,7 @@ func exec(line string) {
 		fmt.Println("commands:")
 		fmt.Println("  help  harts  uptime  mem  echo <text>")
 		fmt.Println("  run [name]   ps   kill <pid>   crash   reap   stress [n]")
+		fmt.Println("  ls [dir]   cat <file>   cp <src> <dst>   put <key> <text>   rm <file>")
 		fmt.Println("  blk   fault  exit")
 	case "harts":
 		fmt.Printf("harts: %d online  GOMAXPROCS=%d  this=hart %d\n",
@@ -111,6 +113,16 @@ func exec(line string) {
 		stress(fields)
 	case "blk":
 		blk()
+	case "ls":
+		ls(fields)
+	case "cat":
+		cat(fields)
+	case "cp":
+		cp(fields)
+	case "put":
+		put(fields)
+	case "rm":
+		rm(fields)
 
 	case "fault":
 		fmt.Println("fault: raising a supervisor exception...")
@@ -154,6 +166,130 @@ func blk() {
 	} else {
 		fmt.Println("blk: read/write self-test MISMATCH")
 	}
+}
+
+// ls lists a directory in the overlay filesystem.
+func ls(fields []string) {
+	dir := "."
+	if len(fields) > 1 {
+		p, ok := fsPath(fields[1])
+		if !ok {
+			fmt.Println("ls: invalid path")
+			return
+		}
+		dir = p
+	}
+	es, err := fs.ReadDir(root, dir)
+	if err != nil {
+		fmt.Printf("ls: %v\n", err)
+		return
+	}
+	for _, e := range es {
+		if e.IsDir() {
+			fmt.Printf("  %-22s <dir>\n", e.Name()+"/")
+			continue
+		}
+		fi, _ := e.Info()
+		fmt.Printf("  %-22s %d\n", e.Name(), fi.Size())
+	}
+}
+
+// cat prints a file from the overlay filesystem.
+func cat(fields []string) {
+	if len(fields) < 2 {
+		fmt.Println("usage: cat <file>")
+		return
+	}
+	p, ok := fsPath(fields[1])
+	if !ok {
+		fmt.Println("cat: invalid path")
+		return
+	}
+	data, err := fs.ReadFile(root, p)
+	if err != nil {
+		fmt.Printf("cat: %v\n", err)
+		return
+	}
+	fmt.Print(string(data))
+	if n := len(data); n == 0 || data[n-1] != '\n' {
+		fmt.Println()
+	}
+}
+
+// cp copies a file into the writable kv layer (which shadows the core).
+func cp(fields []string) {
+	if len(fields) < 3 {
+		fmt.Println("usage: cp <src> <dst>")
+		return
+	}
+	if store == nil {
+		fmt.Println("cp: filesystem is read-only (no block device)")
+		return
+	}
+	src, ok := fsPath(fields[1])
+	dst, ok2 := fsPath(fields[2])
+	if !ok || !ok2 || dst == "." {
+		fmt.Println("cp: invalid path")
+		return
+	}
+	data, err := fs.ReadFile(root, src)
+	if err != nil {
+		fmt.Printf("cp: %v\n", err)
+		return
+	}
+	if err := store.Put(dst, data); err != nil {
+		fmt.Printf("cp: %v\n", err)
+		return
+	}
+	fmt.Printf("cp: %s -> %s (%d bytes)\n", src, dst, len(data))
+}
+
+// put writes inline text to a key in the writable kv layer.
+func put(fields []string) {
+	if len(fields) < 3 {
+		fmt.Println("usage: put <key> <text...>")
+		return
+	}
+	if store == nil {
+		fmt.Println("put: filesystem is read-only (no block device)")
+		return
+	}
+	p, ok := fsPath(fields[1])
+	if !ok || p == "." {
+		fmt.Println("put: invalid key")
+		return
+	}
+	if err := store.Put(p, []byte(strings.Join(fields[2:], " "))); err != nil {
+		fmt.Printf("put: %v\n", err)
+		return
+	}
+	fmt.Printf("put: wrote %s\n", p)
+}
+
+// rm deletes a key from the writable kv layer.
+func rm(fields []string) {
+	if len(fields) < 2 {
+		fmt.Println("usage: rm <file>")
+		return
+	}
+	if store == nil {
+		fmt.Println("rm: filesystem is read-only (no block device)")
+		return
+	}
+	p, ok := fsPath(fields[1])
+	if !ok {
+		fmt.Println("rm: invalid path")
+		return
+	}
+	if _, exists := store.Get(p); !exists {
+		fmt.Printf("rm: %s: not in writable layer\n", p)
+		return
+	}
+	if err := store.Delete(p); err != nil {
+		fmt.Printf("rm: %v\n", err)
+		return
+	}
+	fmt.Printf("rm: removed %s\n", p)
 }
 
 // worker is a cooperative background process: it ticks until its context is

@@ -43,8 +43,10 @@ func main() {
 	// (or piped) during the demo below is captured into the channel.
 	virt.InitConsole()
 
-	// Discover the block device (M3).
+	// Discover the block device (M3) and mount the filesystem (M4): the kv
+	// store over it, overlaid on the immutable embedded core.
 	virt.InitStorage()
+	mountFS()
 
 	// Prove the scheduler actually runs goroutines across multiple harts.
 	harts := smpDemo(nharts)

@@ -1,0 +1,5 @@
+NAME=honk
+PRETTY_NAME=honk (pure-Go RISC-V64)
+ID=honk
+VERSION=0.1
+BUILD=phase-B

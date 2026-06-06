@@ -22,8 +22,9 @@ distribution (`tamago-go`) is auto-built on first use into the OS cache dir.
 | **M1 IRQ + console + shell** | ✅ **complete** | honk S-mode trap vector (proper `sret`); UART RX interrupt → PLIC → ring → channel; interactive shell over the UART; S-mode exceptions print `scause`/`sepc`/`stval` and halt. |
 | **M2 process model** | ✅ **complete** | `proc` table = goroutine + `context` (cancel = kill) + capabilities; `run`/`ps`/`kill`/`crash`/`reap`/`stress` shell commands; `recover()` fault domains (a panicking process is reaped, kernel + siblings survive); race-tested (`go test -race ./kernel/proc`) and stressed under `-smp 4`. |
 | **M3 block device** | ✅ **complete** | `block.Device` interface with two backends: **NVMe-over-PCIe** (PCIe ECAM enumeration + BAR assignment, controller bring-up, admin+I/O queues, identify, PRP read/write - primary) and **virtio-blk** (virtio-mmio v2, split virtqueue - fallback). `blk` shell self-test; both verified for detection, read/write round-trip, and on-disk persistence; smoke test gates both. |
+| **M4 KV store + VFS** | ✅ **complete** | Crash-safe log-structured KV (`kernel/kv`) over `block.Device` - single-appender group commit, lock-free COW snapshot reads, double-buffered superblock, atomic-checkpoint compaction, replay-to-last-valid; exposed as `io/fs.FS` (`kernel/vfs`) overlaid on the embedded core; `ls`/`cat`/`cp`/`put`/`rm` shell. Host race-tested (incl. torn-tail + compaction), `fstest.TestFS`-validated, reboot persistence verified in QEMU. |
 
-**Phase A complete; Phase B (storage) underway.** Next: M4 KV store + VFS.
+**Phase A complete; Phase B (storage) underway.** Next: M5 immutable core (verity + A/B).
 
 ## What boots today (M0+M1)
 
@@ -202,8 +203,35 @@ PRP pointers; transfers are split to at most one page so PRP1[+PRP2] suffice
 polled on the CQ phase tag. `ProbeBlock` selects NVMe if present, else
 virtio-blk - nothing above storage knows the difference.
 
-## Next: M4
+## KV store + VFS (M4) - how it works
 
-Log-structured KV store over `block.Device` (single-writer appender draining a
-channel = group commit; lock-free snapshot readers; checksummed WAL + atomic
-checkpoint), exposed as `io/fs.FS` and overlaid with the `embed.FS` core.
+`kernel/kv` is a crash-safe, log-structured key/value store over `block.Device`,
+mapping the design onto Go primitives (HONK.md §1):
+
+- **One appender goroutine** owns all writes; callers send requests on a channel
+  and the appender drains them in a batch - the drain *is* the group commit
+  (one device write per batch, no write locks).
+- **Lock-free reads:** the index is an immutable map published via an atomic
+  pointer; the appender copies-on-write and swaps it, so `Get` never blocks.
+- **Durability is the log:** records are CRC-checksummed; `Open` replays the
+  active region, stopping at the first torn/absent record (a crash leaves at
+  most an unacknowledged tail, which is discarded and overwritten).
+- **Compaction is an atomic checkpoint:** the live set is rewritten into the
+  other of two log regions, then a *double-buffered* superblock is switched with
+  a single (atomic) block write. A crash mid-compaction leaves the old
+  superblock and region intact.
+
+`kernel/vfs` exposes the store as a nested `io/fs.FS` (directories synthesized
+from slash-separated keys) and a union `Overlay`: the writable kv FS over the
+read-only embedded core (`//go:embed`), with the upper layer shadowing the
+lower. The shell's `ls`/`cat` read through the overlay; `cp`/`put`/`rm` write
+through the kv store. All of kv/vfs is pure Go: `go test -race ./kernel/kv
+./kernel/vfs` covers put/get/delete, replay, torn-tail, compaction, concurrency,
+and `fstest.TestFS`; reboot persistence is verified in QEMU by the smoke test.
+
+## Next: M5
+
+Immutable core: a `mkimage` tool builds a Merkle tree over the core image with
+an ed25519-signed root; boot verifies it through an anchored-boot interface and
+serves it read-only; A/B slots verify-then-switch with fallback; stateless
+reset clears the kv layer.

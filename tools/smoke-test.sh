@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
-# Build honk and boot it under QEMU, asserting the expected M0-M3 output for
-# both block backends (NVMe primary, virtio-blk fallback). Exits non-zero on
-# any missing line or a boot hang. CI-friendly.
+# Build honk and boot it under QEMU, asserting M0-M4 behavior across both block
+# backends (NVMe primary, virtio-blk fallback) and verifying kv/fs persistence
+# across a reboot. Exits non-zero on any missing line or a boot hang.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 WATCHDOG="${WATCHDOG:-45}"
 SMP="${SMP:-4}"
 
-# Host race test of the process model (M2): the proc package is pure Go.
-echo "== go test -race ./kernel/proc =="
-go test -race -count=1 ./kernel/proc/ || { echo "SMOKE FAIL: proc race test" >&2; exit 1; }
+# Host race tests of the pure-Go storage stack (M2 proc, M4 kv + vfs).
+echo "== go test -race ./kernel/... ./block =="
+go test -race -count=1 ./kernel/proc/ ./kernel/kv/ ./kernel/vfs/ ./block/ ||
+	{ echo "SMOKE FAIL: host race tests" >&2; exit 1; }
 
 tools/build.sh >/dev/null
 
-NVME="$(mktemp)"
-VB="$(mktemp)"
-A="$(mktemp)"
-B="$(mktemp)"
-trap 'rm -f "$NVME" "$VB" "$A" "$B"' EXIT
+NVME="$(mktemp)" VB="$(mktemp)"
+A="$(mktemp)" P="$(mktemp)" B="$(mktemp)"
+trap 'rm -f "$NVME" "$VB" "$A" "$P" "$B"' EXIT
 dd if=/dev/zero of="$NVME" bs=1048576 count=16 2>/dev/null
 dd if=/dev/zero of="$VB" bs=1048576 count=16 2>/dev/null
 
@@ -50,27 +49,36 @@ want() {
 	[ "$fail" -eq 0 ] || { cat "$outf"; exit 1; }
 }
 
-# Run A: NVMe primary, full M0-M3 shell exercise.
-boot $'\nhelp\nblk\nrun\nps\ncrash\nstress 16\nps\nexit\n' "$A" \
-	-drive file="$NVME",if=none,id=nvm,format=raw -device nvme,serial=honk,drive=nvm
+nvme=(-drive "file=$NVME,if=none,id=nvm,format=raw" -device nvme,serial=honk,drive=nvm)
+
+# Run A: NVMe primary; full M0-M4 exercise; writes land in the kv store.
+boot $'\nhelp\nblk\ncat os-release\ncp motd readme\nput config/host honkbox\nls\nrun\ncrash\nstress 16\nexit\n' \
+	"$A" "${nvme[@]}"
 cat "$A"
-want "$A" "NVMe" <<'EOF'
-honk: entered main
+want "$A" "NVMe/M0-M4" <<'EOF'
 honk: HS-mode boot ok
-SMP up  harts=4  GOMAXPROCS=4
 SMP OK - goroutines ran on
-shell ready
 storage = NVMe
 blk: read/write self-test OK
-init
+NAME=honk
+cp: motd -> readme
+put: wrote config/host
+readme
 kernel survives
 ran across
 honk: shutting down
 EOF
 
+# Run P: reboot on the SAME NVMe disk - kv/fs state must persist.
+boot $'\ncat config/host\ncat readme\nexit\n' "$P" "${nvme[@]}"
+want "$P" "persistence" <<'EOF'
+honkbox
+Welcome to honk
+EOF
+
 # Run B: virtio-blk fallback (no NVMe attached).
 boot $'\nblk\nexit\n' "$B" \
-	-drive file="$VB",if=none,id=blk0,format=raw -device virtio-blk-device,drive=blk0
+	-drive "file=$VB,if=none,id=blk0,format=raw" -device virtio-blk-device,drive=blk0
 want "$B" "virtio-blk" <<'EOF'
 storage = virtio-blk
 blk: read/write self-test OK

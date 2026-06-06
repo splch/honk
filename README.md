@@ -24,7 +24,9 @@ is downloaded and built automatically on first use.
 ```
 kernel/        the HS-mode Go program (the OS): boot, SMP demo, shell
 kernel/proc/   process model: goroutine + context + capabilities (host-tested)
-block/         block-device interface (host-tested)
+block/         block-device interface + in-memory device (host-tested)
+kernel/kv/     crash-safe log-structured key/value store (host-tested)
+kernel/vfs/    io/fs.FS over the kv store + overlay on the embedded core (host-tested)
 board/virt/    QEMU virt board: startup, SMP, traps, PLIC, UART, PCIe/NVMe, virtio-blk, SBI
 tools/         build.sh, run-qemu.sh, smoke-test.sh, mkboot (boot trampoline)
 HONK.md        full design and roadmap
@@ -32,8 +34,10 @@ docs/STATUS.md what works today and what's next
 GO.md RV64.md OS.md   language / hardware / domain references
 ```
 
-Status: **Phase A complete (M0-M2); Phase B underway (M3 done)** - HS-mode boot
-under OpenSBI, SMP across all harts, an interrupt-driven UART console + shell, a
-process model (goroutine + context + capabilities, `recover()` fault domains),
-and a persistent block device (NVMe-over-PCIe, with a virtio-blk fallback).
-`make run` drops you at a `honk>` prompt; try `help`. See `docs/STATUS.md`.
+Status: **Phase A complete (M0-M2); Phase B underway (M3-M4 done)** - HS-mode
+boot under OpenSBI, SMP across all harts, an interrupt-driven UART console +
+shell, a process model (goroutine + context + capabilities, `recover()` fault
+domains), a persistent block device (NVMe-over-PCIe + virtio-blk fallback), and
+a crash-safe log-structured kv store exposed as an overlay filesystem over an
+embedded core. `make run` drops you at a `honk>` prompt; try `help`, `ls`,
+`cat motd`. See `docs/STATUS.md`.

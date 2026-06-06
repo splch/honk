@@ -20,11 +20,11 @@ fmt:
 
 # vet runs under the tamago toolchain so the GOOS=tamago files are analyzed.
 vet:
-	$(GOENV) $(TAMAGO) vet ./kernel ./kernel/proc ./board/...
+	$(GOENV) $(TAMAGO) vet ./kernel ./kernel/... ./board/... ./block
 
-# Host race tests for the portable, pure-Go packages (e.g. the process model).
+# Host race tests for the portable, pure-Go packages (process model, storage).
 test:
-	go test -race -count=1 ./kernel/proc/...
+	go test -race -count=1 ./kernel/proc/ ./kernel/kv/ ./kernel/vfs/ ./block/
 
 # Build + boot under QEMU and assert expected output (CI gate).
 smoke:

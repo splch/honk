@@ -326,6 +326,14 @@ is front-loaded; the OS logic on top of it is small because it is Go.
      test gates both. See `docs/STATUS.md`.
 5. **M4 KV store + VFS.** Log-structured KV -> `io/fs.FS`; overlay with the
    `embed.FS` core; `ls`/`cat`/`cp`.
+   - *Status:* **COMPLETE + verified.** `kernel/kv` = crash-safe log-structured
+     KV over `block.Device` (single-appender group commit, lock-free COW
+     snapshot reads, double-buffered superblock, atomic-checkpoint compaction,
+     replay-to-last-valid). `kernel/vfs` = nested `io/fs.FS` over the KV +
+     union `Overlay` of the writable KV over the read-only `//go:embed` core.
+     Shell `ls`/`cat`/`cp`/`put`/`rm`. Host race-tested (torn-tail, compaction,
+     concurrency) + `fstest.TestFS`; reboot persistence verified in QEMU. See
+     `docs/STATUS.md`.
 6. **M5 Immutable core.** `mkimage` verity + A/B; boot verifies + serves R-O;
    stateless reset.
 

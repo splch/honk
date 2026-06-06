@@ -1,0 +1,5 @@
+Welcome to honk - a modern pure-Go RISC-V 64 operating system.
+
+This file lives in the immutable, embedded core image (read-only). Files you
+write with `cp` land in the persistent kv store, which shadows the core in the
+overlay filesystem.
