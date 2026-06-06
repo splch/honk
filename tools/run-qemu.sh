@@ -54,5 +54,7 @@ exec qemu-system-riscv64 \
 	-netdev "user,id=n0,hostfwd=tcp::${HTTP:-8080}-:80" \
 	-device virtio-net-device,netdev=n0 \
 	-device virtio-gpu-device \
+	-device virtio-keyboard-device \
+	-device virtio-tablet-device \
 	-fsdev local,id=hostdev,path="$SHARE",security_model=none \
 	-device virtio-9p-device,fsdev=hostdev,mount_tag=host

@@ -8,7 +8,7 @@ Living record of what is implemented and verified, and what is next. See
 ```sh
 make run        # build + boot under QEMU virt (Ctrl-A x to quit)
 make test       # host race tests of every pure-Go package
-make smoke      # build + boot + assert M0-M9 output (CI gate)
+make smoke      # build + boot + assert M0-M10 output (CI gate)
 make phase-a    # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
 make vet        # go vet under the tamago toolchain
 ```
@@ -64,7 +64,9 @@ M0-M5 smoke test. The split is by where the authority for correctness lives:
 
 | **M9 framebuffer** | ✅ **complete** | **virtio-gpu -> a stdlib `draw.Image`.** honk's own virtio-gpu driver (`board/virt/virtiogpu.go`, on the shared virtio-mmio v2 transport) hides the 2D control protocol (display info, create-2d resource, attach the framebuffer as backing, set scanout, transfer-to-host + flush) behind a tiny interface: an `*image.RGBA` to draw into and `Flush()`. `kernel/display.go` draws a four-quadrant test pattern with `image/draw` and flushes it (output-first; M10 adds input + a toolkit). Format `R8G8B8A8` matches `image.RGBA` byte-for-byte (no swizzle). QEMU-verified **end to end**: the smoke test boots headless (`-display none`), captures the scanout over QMP `screendump`, and asserts the rendered quadrant colors (`tools/screendump.py`) - proving real pixels reached the host framebuffer, not just that the control commands succeeded. Shell `fb`. |
 
-**Phase A + B + C complete (the everyday networked OS): M6 networking + M7 WASM/WASI + M8 host files. Phase D underway: M9 framebuffer.** Next: M10 GUI + input (a toolkit over `image/draw` + font, virtio-input).
+| **M10 GUI + input** | ✅ **complete** | **virtio-input + a minimal `image/draw` toolkit.** honk's virtio-input driver (`board/virt/virtioinput.go`, polled like the other virtio devices - a queue-backed device loses nothing without an IRQ) surfaces raw evdev events from QEMU's virtio-keyboard + virtio-tablet. `kernel/gui` is a pure-Go retained-mode toolkit (a `UI` routing pointer/key events to widgets, `Button` + `TextField`, text via `x/image/font/basicfont`) rendering into any `draw.Image`; `kernel/ui.go` translates evdev -> `gui.Event` (keycode->rune, tablet axes->pixels) and pumps them into an interactive demo on the M9 framebuffer. Host race-tested (event dispatch, focus routing, **and rendered pixels** in an in-memory image). QEMU-verified end to end and headless: the smoke test injects a click + typed text over QMP `input-send-event`, asserts honk logged them (serial) and that the click's green reached the host framebuffer (screendump, `tools/uitest.py`). Shell `ui`. |
+
+**Phase A + B + C complete (the everyday networked OS): M6 networking + M7 WASM/WASI + M8 host files. Phase D complete: M9 framebuffer + M10 GUI/input.** Next: Phase E - M11 H-extension hypervisor bring-up (the only paging in honk).
 
 ## What boots today (M0+M1)
 
@@ -510,8 +512,52 @@ rectangles), polled control queue (no IRQ), software rendering only (no virgl/3D
 buffering, and the cursor queue are future work; the toolkit + `virtio-input`
 land in M10.
 
-## Next: M10
+## GUI + input (M10) - how it works
 
-Phase D continues - GUI + input. A minimal toolkit over `image/draw` + a font,
-and `virtio-input` (IRQ -> channel -> dispatch -> focused widget), with an
-interactive demo you can click and type into.
+`board/virt/virtioinput.go` is the bare-metal half; `kernel/gui` (pure Go,
+host-tested) is the toolkit; `kernel/ui.go` is the glue.
+
+- **The driver is dumb on purpose.** It does virtqueue mechanics only - sets up
+  the eventq, posts 8-byte buffers, and `Read()` returns the next raw evdev
+  `InputEvent{Type, Code, Value}`, recycling the buffer. It aggregates every
+  virtio-input device found (QEMU's keyboard + tablet) behind one `Read` loop.
+  It is **polled**, not interrupt-driven: a virtio-input device buffers events
+  in its eventq until collected, so polling is lossless (unlike the UART's small
+  FIFO, which is why the console *is* IRQ-driven). This keeps input off the
+  nosplit trap path and consistent with honk's other virtio drivers; true
+  IRQ-wakeup is the same deferred async-I/O item as the rest of them.
+- **The toolkit knows nothing about hardware.** `kernel/gui` is a retained-mode
+  toolkit over `image/draw` and the stdlib bitmap font
+  (`x/image/font/basicfont`): a `UI` owns widgets, routes pointer events to the
+  widget under the cursor (moving keyboard focus on a press) and key events to
+  the focused widget, and composites by drawing each widget. `Button` (click ->
+  toggle + `OnClick`) and `TextField` (typed runes + backspace -> `OnChange`)
+  are the two widgets. It renders into any `draw.Image`, so it is fully
+  host-tested - the tests assert both the state transitions and the **rendered
+  pixels** (button center is the toggled-on green; the typed glyphs leave dark
+  pixels on the field; focus draws the blue border).
+- **The glue owns policy.** `kernel/ui.go` translates raw evdev into clean
+  `gui.Event`s (a keycode->rune table; tablet absolute axes scaled to screen
+  pixels; `BTN_LEFT` -> pointer down/up), pumps them into the demo (a text field
+  + a button) every 8 ms, and repaints the M9 framebuffer on change. The demo's
+  callbacks log to the serial console, which is what the smoke test asserts.
+- **Verified end to end, headless.** The smoke test boots honk with a
+  virtio-gpu + virtio-keyboard + virtio-tablet under `-display none`, injects a
+  click and the keystrokes `honk` over QMP `input-send-event`
+  (`tools/uitest.py`), and asserts honk decoded + dispatched them (serial: the
+  button click and the growing text) and that the button's green fill reached
+  the host framebuffer (screendump). So the whole path - virtio-input ->
+  evdev decode -> translate -> toolkit dispatch -> focus -> render ->
+  virtio-gpu flush -> host - is proven without a display.
+
+**Honest scope.** Two widgets, one window, no compositor/z-order beyond add
+order, no scrolling/resize/IME/clipboard, lowercase + digits + space only (no
+shift/modifiers), polled input. Enough to click and type; a real toolkit (more
+widgets, layout, theming) is future work.
+
+## Next: M11
+
+Phase E - the hypervisor (the only paging in honk; the first pure-Go RISC-V
+VMM). M11: enable the H-extension, set up two-stage paging (`hgatp`), and
+trap-and-emulate a trivial hand-rolled VS-mode payload that prints via an
+emulated SBI console - proving the mechanism in isolation before a real guest.

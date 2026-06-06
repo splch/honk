@@ -4,9 +4,10 @@
 # block I/O, the kv store + overlay filesystem with reboot persistence, the
 # immutable signed core image (verification, A/B selection + fallback), the
 # stateless reset, networking (virtio-net + gVisor + net/http), the WASM/WASI
-# tier, host files over 9p, and the virtio-gpu framebuffer (a test pattern
-# captured from the host via QMP screendump). Exits non-zero on any missing
-# line or a hang.
+# tier, host files over 9p, the virtio-gpu framebuffer (a test pattern captured
+# from the host via QMP screendump), and GUI + input (virtio-input events
+# injected over QMP, dispatched into the image/draw toolkit). Exits non-zero on
+# any missing line or a hang.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,7 +31,8 @@ NVME="$(mktemp)" RNVME="$(mktemp)" VB="$(mktemp)" AB="$(mktemp)"
 A="$(mktemp)" P="$(mktemp)" B="$(mktemp)" R="$(mktemp)" S1="$(mktemp)" S2="$(mktemp)" N="$(mktemp)"
 H="$(mktemp)" HNVME="$(mktemp)" HSHARE="$(mktemp -d)"
 G="$(mktemp)" GSER="$(mktemp)" GNVME="$(mktemp)" GPUPPM="$(mktemp).ppm" GPUSOCK="$(mktemp -u).qmp"
-trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$N" "$AIMG" "$BIMG" "$H" "$HNVME" "$G" "$GSER" "$GNVME" "$GPUPPM" "$GPUSOCK"; rm -rf "$HSHARE"' EXIT
+UOUT="$(mktemp)" USRL="$(mktemp)" UNVME="$(mktemp)" UPPM="$(mktemp).ppm" USOCK="$(mktemp -u).qmp"
+trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$N" "$AIMG" "$BIMG" "$H" "$HNVME" "$G" "$GSER" "$GNVME" "$GPUPPM" "$GPUSOCK" "$UOUT" "$USRL" "$UNVME" "$UPPM" "$USOCK"; rm -rf "$HSHARE"' EXIT
 dd if=/dev/zero of="$NVME" bs=1048576 count=16 2>/dev/null
 dd if=/dev/zero of="$VB" bs=1048576 count=16 2>/dev/null
 
@@ -221,6 +223,45 @@ if command -v python3 >/dev/null 2>&1; then
 		{ echo "SMOKE FAIL (gpu): test pattern not verified from screendump" >&2; cat "$GSER"; exit 1; }
 else
 	echo "SMOKE NOTE (gpu): python3 not found; skipped the screendump pixel check"
+fi
+
+# Run U: GUI + input (M10). Boot with a virtio-gpu plus virtio-keyboard and
+# virtio-tablet, no display, and inject input over QMP: click the button, focus
+# the text field, type "honk". honk decodes the evdev events through its
+# virtio-input driver, dispatches them into the image/draw toolkit (focus,
+# click, typing), and repaints the framebuffer. We assert honk logged the click
+# and the typed text (serial - the robust primary proof) and, when python3 is
+# present, that the button's toggled-on green reached the host framebuffer.
+dd if=/dev/zero of="$UNVME" bs=1048576 count=16 2>/dev/null
+qemu-system-riscv64 -machine virt -global virtio-mmio.force-legacy=false \
+	-cpu rv64,h=true -smp "$SMP" -m 512M -display none -bios default -no-reboot \
+	-kernel boot.bin -device loader,file=honk.elf \
+	-drive "file=$UNVME,if=none,id=nvm,format=raw" -device nvme,serial=honk,drive=nvm \
+	-device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device \
+	-serial "file:$USRL" -qmp "unix:$USOCK,server,nowait" >/dev/null 2>&1 &
+uqpid=$!
+( sleep "$WATCHDOG"; kill -9 "$uqpid" 2>/dev/null ) &
+uwpid=$!
+sleep 7 # let honk boot and bring up the UI
+if command -v python3 >/dev/null 2>&1; then
+	# button center (40,160,240,220) ~ (140,190); field center (40,80,640,124) ~ (340,102)
+	python3 tools/uitest.py "$USOCK" "$UPPM" 140 190 340 102 honk >"$UOUT" 2>&1 || true
+	cat "$UOUT"
+fi
+kill -9 "$uqpid" 2>/dev/null || true
+wait "$uqpid" 2>/dev/null || true
+kill "$uwpid" 2>/dev/null || true
+want "$USRL" "input" <<'EOF'
+input = virtio-input
+ui up
+ui: button clicked (clicks=1)
+ui: text="honk"
+EOF
+if command -v python3 >/dev/null 2>&1; then
+	grep -qF "UI CLICK OK" "$UOUT" ||
+		{ echo "SMOKE FAIL (ui): click not reflected in the framebuffer" >&2; cat "$USRL"; exit 1; }
+else
+	echo "SMOKE NOTE (ui): python3 not found; skipped the input-injection check"
 fi
 
 echo "----------------------------------------"

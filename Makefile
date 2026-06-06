@@ -30,7 +30,7 @@ vet: coreimg
 # Host race tests for the portable, pure-Go packages (process model, console
 # input ring, storage, image verity).
 test:
-	go test -race -count=1 ./kernel/proc/ ./board/virt/ring/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./kernel/p9/ ./block/
+	go test -race -count=1 ./kernel/proc/ ./board/virt/ring/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./kernel/p9/ ./kernel/gui/ ./block/
 
 # Build + boot under QEMU and assert expected output (CI gate).
 smoke:

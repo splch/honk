@@ -60,6 +60,10 @@ func main() {
 	// image packages, showing a test pattern. No-op without a GPU.
 	InitDisplay()
 
+	// Bring up input + the interactive GUI demo (M10): virtio-input events
+	// pumped into a minimal image/draw toolkit. No-op without input + display.
+	InitUI()
+
 	// Prove the scheduler actually runs goroutines across multiple harts.
 	harts := smpDemo(nharts)
 	if len(harts) > 1 {
