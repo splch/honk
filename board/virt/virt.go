@@ -41,10 +41,20 @@ func Uptime() time.Duration { return time.Duration(nanotime()) }
 // trap path; it prints the trap CSRs and powers off. It does not return.
 func Fault() { triggerFault() }
 
-// hwinit0 runs before the runtime World is started (no allocation possible).
+// hwinit0 runs before the runtime World is started, so it must not allocate.
+// It sizes the runtime arena from the device tree: OpenSBI/QEMU place the DTB
+// at the top of usable RAM, so [RamStart, DTB) is exactly the memory honk may
+// use. This needs no hardcoded size and no FDT parsing, is correct for any
+// QEMU -m, and leaves the DTB intact for later use. A bogus DTB keeps the
+// static fallback ramSize.
 //
 //go:linkname hwinit0 runtime/goos.Hwinit0
-func hwinit0() {}
+//go:nosplit
+func hwinit0() {
+	if bootDTB > ramStart+minRAMSize {
+		ramSize = bootDTB - ramStart
+	}
+}
 
 // hwinit1 runs early in runtime setup, after the World is up. We wire the
 // optional goos termination hooks here so a returning (or deadlocked) kernel

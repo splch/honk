@@ -48,13 +48,14 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOV	$(1<<1), T0
 	CSRRS	T0, SSTATUS, ZERO	// sstatus.SIE (global S-mode interrupts)
 
-	// Boot stack pointer at the top of usable RAM:
-	//	sp = RamStart + RamSize - RamStackOffset
-	MOV	runtime∕goos·RamStart(SB), X2
-	MOV	runtime∕goos·RamSize(SB), T1
-	MOV	runtime∕goos·RamStackOffset(SB), T2
-	ADD	T1, X2
-	SUB	T2, X2
+	// Boot (g0) stack at the top of usable RAM. OpenSBI places the DTB (a1,
+	// stashed in bootDTB) at the top of RAM; the g0 stack sits just below it,
+	// and the runtime grows the heap upward to g0.stack.lo - so the stack must
+	// be high, not in BSS. This is independent of RamSize (hwinit0 derives that
+	// next) and correct for any QEMU -m.
+	MOV	·bootDTB(SB), X2
+	ADD	$-256, X2		// RamStackOffset gap below the DTB
+	AND	$-16, X2		// 16-byte align
 
 	// Hand off to the privilege-agnostic Go runtime bring-up (sets up g0/m0,
 	// runs hwinit0/osinit/schedinit/hwinit1, then starts main).

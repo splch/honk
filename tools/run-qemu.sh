@@ -4,7 +4,7 @@
 # OpenSBI's fw_dynamic enters the boot trampoline (boot.bin) at 0x80200000,
 # which jumps to honk.elf (loaded by -device loader at its link address).
 #
-#   MEM   QEMU RAM size   (default 512M; must match board/virt/mem.go ramSize)
+#   MEM   QEMU RAM size   (default 512M; any size works - sized from the DTB)
 #   SMP   number of harts (default 4)
 #
 # Quit an interactive session with Ctrl-A then x.

@@ -74,9 +74,20 @@ a custom bios):
    which otherwise selects the host compiler and fails with
    `compile: unknown goos tamago`.
 
-Memory map (sized for `-m 512M`, hardcoded until DTB parsing lands):
-`RamStart=0x80400000`, `RamSize=0x1DA00000` (ends below the DTB at ~0x9fe00000
-so the runtime arena/boot stack never clobber it).
+Memory map: `RamStart=0x80400000` (honk's load address; must match `-T` in
+build.sh). `RamSize` is **discovered, not hardcoded**: OpenSBI/QEMU place the
+DTB at the top of usable RAM, so cpuinit puts the g0 stack just below the DTB
+(`a1`) and `hwinit0` sets `RamSize = DTB - RamStart`. This is exact for any
+QEMU `-m` (verified at 256M/512M/1G/2G), needs no FDT parsing, and leaves the
+DTB intact. (Note: tamago's allocator grows the heap up to `g0.stack.lo`, so
+the g0 stack must be at the top of RAM, above the heap.)
+
+**Deferred hardening (tracked, not yet done):** the trap handler runs on the
+interrupted goroutine's stack (relying on the runtime's nosplit red zone, as
+TamaGo's own IRQ path does) rather than a dedicated per-hart interrupt stack;
+and idle harts busy-poll rather than `WFI`. Neither is a correctness bug in the
+tested configs, but both are worth closing as interrupts become frequent in
+Phase B+.
 
 ## Process model (M2) - how it works
 
@@ -158,6 +169,6 @@ larger `-smp` values.
 ## Next: M3 (Phase B - storage)
 
 PCIe ECAM enumeration and an NVMe driver (with a virtio-blk fallback)
-implementing a `BlockDevice` interface. Cheap groundwork still pending and
-shared with later milestones: DTB parsing (hart count, RAM size, MMIO bases)
-to replace the hardcoded memory map and the SBI-HSM hart probing.
+implementing a `BlockDevice` interface. RAM size is now DTB-derived; hart count
+is SBI-probed and MMIO bases are board constants (standard for a fixed board),
+so a full FDT parser is optional until honk targets boards beyond QEMU virt.

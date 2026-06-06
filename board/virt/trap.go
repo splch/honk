@@ -20,9 +20,14 @@ func mmioRead32(addr uintptr) uint32
 func mmioWrite32(addr uintptr, v uint32)
 
 // handleIRQ services an S-mode interrupt synchronously, from trap context. It
-// is nosplit and FP-free so it neither grows the interrupted stack nor clobbers
-// FP state. It claims the PLIC, drains the UART into the input ring, and
-// completes - leaving nothing pending, so the sret in trapEntry does not storm.
+// claims the PLIC, drains the UART into the input ring, and completes - leaving
+// nothing pending, so the sret in trapEntry does not storm.
+//
+// CONTRACT: handleIRQ and everything it transitively calls MUST be //go:nosplit
+// and free of floating-point operations. trapEntry saves only integer
+// caller-saved registers and runs on the interrupted goroutine's stack; it does
+// NOT save FP state or grow the stack. Introducing a stack split or an FP op on
+// this path would silently corrupt the interrupted goroutine.
 //
 //go:nosplit
 func handleIRQ() {

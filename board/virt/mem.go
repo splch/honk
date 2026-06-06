@@ -6,24 +6,28 @@ package virt
 
 import _ "unsafe"
 
-// honk loads above the boot trampoline: OpenSBI enters the trampoline at
-// 0x80200000 (tools/mkboot), which jumps to honk linked at 0x80400000.
-// RamStart is honk's load address, so the Go runtime allocator never hands out
-// firmware- or trampoline-owned memory.
+// ramStart is honk's load address: it links and loads at 0x80400000 (above the
+// boot trampoline). This MUST match the -T flag in tools/build.sh. Memory below
+// it (OpenSBI, trampoline) is never part of the runtime's arena.
 //
 //go:linkname ramStart runtime/goos.RamStart
 var ramStart uint64 = 0x80400000
 
-// RamSize ends below where QEMU places the device tree (top of RAM), so the
-// runtime arena and boot stack never clobber the DTB. Sized for `-m 512M`
-// (RAM 0x80000000-0xA0000000, DTB ~0x9fe00000); device-tree driven sizing
-// lands in a later milestone. Keep tools/run-qemu.sh's -m in sync.
+// ramSize is the runtime arena size. hwinit0 derives the true value from the
+// device tree (which OpenSBI/QEMU place at the top of usable RAM) before the
+// runtime starts; this static value is only a fallback for a bogus DTB. The
+// runtime grows the heap up to the g0 stack (cpuinit puts it just below the
+// DTB), so this size and that stack top are kept consistent.
 //
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint64 = 0x9fe00000 - 0x80400000 // 0x1DA00000
+var ramSize uint64 = 64 << 20
 
-// RamStackOffset is the negative offset from the end of RAM at which the boot
-// (g0) stack is placed.
+// ramStackOffset is the gap left below the DTB for the boot (g0) stack top.
+// cpuinit reads it; the runtime/goos contract also requires it.
 //
 //go:linkname ramStackOffset runtime/goos.RamStackOffset
 var ramStackOffset uint64 = 0x100
+
+// minRAMSize is the smallest plausible arena; hwinit0 ignores a DTB address
+// that would imply less, keeping the fallback ramSize.
+const minRAMSize = 16 << 20
