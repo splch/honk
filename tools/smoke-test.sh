@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Build honk and boot it under QEMU, asserting M0-M8 behavior across both block
+# Build honk and boot it under QEMU, asserting M0-M9 behavior across both block
 # backends (NVMe primary, virtio-blk fallback): SMP + console + process model,
 # block I/O, the kv store + overlay filesystem with reboot persistence, the
 # immutable signed core image (verification, A/B selection + fallback), the
 # stateless reset, networking (virtio-net + gVisor + net/http), the WASM/WASI
-# tier, and host files over 9p. Exits non-zero on any missing line or a hang.
+# tier, host files over 9p, and the virtio-gpu framebuffer (a test pattern
+# captured from the host via QMP screendump). Exits non-zero on any missing
+# line or a hang.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -27,7 +29,8 @@ env -u GOOS -u GOARCH -u GOOSPKG go run ./tools/mkimage -version 1 kernel/core "
 NVME="$(mktemp)" RNVME="$(mktemp)" VB="$(mktemp)" AB="$(mktemp)"
 A="$(mktemp)" P="$(mktemp)" B="$(mktemp)" R="$(mktemp)" S1="$(mktemp)" S2="$(mktemp)" N="$(mktemp)"
 H="$(mktemp)" HNVME="$(mktemp)" HSHARE="$(mktemp -d)"
-trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$N" "$AIMG" "$BIMG" "$H" "$HNVME"; rm -rf "$HSHARE"' EXIT
+G="$(mktemp)" GSER="$(mktemp)" GNVME="$(mktemp)" GPUPPM="$(mktemp).ppm" GPUSOCK="$(mktemp -u).qmp"
+trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$N" "$AIMG" "$BIMG" "$H" "$HNVME" "$G" "$GSER" "$GNVME" "$GPUPPM" "$GPUSOCK"; rm -rf "$HSHARE"' EXIT
 dd if=/dev/zero of="$NVME" bs=1048576 count=16 2>/dev/null
 dd if=/dev/zero of="$VB" bs=1048576 count=16 2>/dev/null
 
@@ -182,6 +185,43 @@ storage = NVMe
 net up  ip=10.0.2.15/24  gw=10.0.2.2
 httpd serving on :80
 EOF
+
+# Run G: framebuffer (M9). Boot with a virtio-gpu device and NO display, then
+# capture the scanout over QMP and verify the test pattern's pixels reached the
+# host framebuffer. This exercises honk's virtio-gpu driver (control queue,
+# resource + scanout + flush) and the stdlib image/draw render path end to end.
+# QEMU keeps the console surface in memory under -display none, so screendump
+# works headless. The channel-distinct quadrants also catch a swapped format.
+dd if=/dev/zero of="$GNVME" bs=1048576 count=16 2>/dev/null
+qemu-system-riscv64 -machine virt -global virtio-mmio.force-legacy=false \
+	-cpu rv64,h=true -smp "$SMP" -m 512M -display none -bios default -no-reboot \
+	-kernel boot.bin -device loader,file=honk.elf \
+	-drive "file=$GNVME,if=none,id=nvm,format=raw" -device nvme,serial=honk,drive=nvm \
+	-device virtio-gpu-device \
+	-serial "file:$GSER" -qmp "unix:$GPUSOCK,server,nowait" >/dev/null 2>&1 &
+gqpid=$!
+( sleep "$WATCHDOG"; kill -9 "$gqpid" 2>/dev/null ) &
+gwpid=$!
+sleep 7 # let honk boot and bring up the scanout
+if command -v python3 >/dev/null 2>&1; then
+	python3 tools/screendump.py --check "$GPUSOCK" "$GPUPPM" >"$G" 2>&1 || true
+	cat "$G"
+fi
+kill -9 "$gqpid" 2>/dev/null || true
+wait "$gqpid" 2>/dev/null || true
+kill "$gwpid" 2>/dev/null || true
+# Always assert the driver brought the display up (serial); assert the captured
+# pixels too when python3 is available (the stronger, end-to-end proof).
+want "$GSER" "gpu driver" <<'EOF'
+display = virtio-gpu
+display up
+EOF
+if command -v python3 >/dev/null 2>&1; then
+	grep -qF "GPU PATTERN OK" "$G" ||
+		{ echo "SMOKE FAIL (gpu): test pattern not verified from screendump" >&2; cat "$GSER"; exit 1; }
+else
+	echo "SMOKE NOTE (gpu): python3 not found; skipped the screendump pixel check"
+fi
 
 echo "----------------------------------------"
 echo "SMOKE PASS"

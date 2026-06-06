@@ -420,6 +420,20 @@ is front-loaded; the OS logic on top of it is small because it is Go.
 **Phase D - display/GUI**
 10. **M9 Framebuffer.** virtio-gpu -> `draw.Image`; compositor; draw a test
     pattern (output first, so rendering is solid before events).
+    - *Status:* **COMPLETE + verified.** honk's own virtio-gpu driver
+      (`board/virt/virtiogpu.go`, on the shared virtio-mmio v2 transport) hides
+      the 2D control protocol behind a tiny interface - an `*image.RGBA` to draw
+      into (`Image()`) and `Flush()` - so `kernel/display.go` brings up a single
+      full-screen scanout and draws a four-quadrant test pattern with the stdlib
+      `image`/`image/draw` packages (output-first; input + toolkit are M10). The
+      resource format `R8G8B8A8` matches `image.RGBA` byte-for-byte (no
+      swizzle), and honk's identity map lets the framebuffer slice be the
+      resource's backing at its own address. QEMU-verified **end to end and
+      headless**: the smoke test boots under `-display none`, captures the
+      scanout over QMP `screendump` (`tools/screendump.py`), and asserts the
+      rendered quadrant colors - proving real pixels reached the host
+      framebuffer (and that the format is correct), not just that the control
+      commands succeeded. Shell `fb`. See `docs/STATUS.md`.
 11. **M10 GUI + input.** Toolkit over `image/draw` + font; **virtio-input** (IRQ
     -> channel -> dispatch goroutine -> focused widget); an interactive demo app
     (Go or WASM) you can click and type into.

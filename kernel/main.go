@@ -56,6 +56,10 @@ func main() {
 	// dynamic, any-toolchain code. WASM modules run as honk processes.
 	InitWASM()
 
+	// Bring up the display (M9): a virtio-gpu framebuffer drawn via the stdlib
+	// image packages, showing a test pattern. No-op without a GPU.
+	InitDisplay()
+
 	// Prove the scheduler actually runs goroutines across multiple harts.
 	harts := smpDemo(nharts)
 	if len(harts) > 1 {

@@ -8,7 +8,7 @@ Living record of what is implemented and verified, and what is next. See
 ```sh
 make run        # build + boot under QEMU virt (Ctrl-A x to quit)
 make test       # host race tests of every pure-Go package
-make smoke      # build + boot + assert M0-M8 output (CI gate)
+make smoke      # build + boot + assert M0-M9 output (CI gate)
 make phase-a    # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
 make vet        # go vet under the tamago toolchain
 ```
@@ -62,7 +62,9 @@ M0-M5 smoke test. The split is by where the authority for correctness lives:
 
 | **M8 host files** | ✅ **complete** | **9p-over-virtio as an `io/fs.FS`.** honk's own virtio-9p driver (`board/virt/virtio9p.go`, on the shared virtio-mmio transport) carries whole 9P messages for a hand-rolled read-only **9P2000.L client** (`kernel/p9`), which presents the host-shared directory as a standard `io/fs.FS` and is unioned into the overlay (writable kv → host share → verified core). `mount` reports the layers; `ls`/`cat` read host files through the same overlay as the core and kv. The 9P client is pure Go, host race-tested against an in-process 9P server incl. `fstest.TestFS`; QEMU-verified end to end (`-fsdev local` + `virtio-9p-device`) and smoke-gated. |
 
-**Phase A + B + C complete (the everyday networked OS): M6 networking + M7 WASM/WASI + M8 host files.** Next: Phase D - M9 framebuffer (virtio-gpu).
+| **M9 framebuffer** | ✅ **complete** | **virtio-gpu -> a stdlib `draw.Image`.** honk's own virtio-gpu driver (`board/virt/virtiogpu.go`, on the shared virtio-mmio v2 transport) hides the 2D control protocol (display info, create-2d resource, attach the framebuffer as backing, set scanout, transfer-to-host + flush) behind a tiny interface: an `*image.RGBA` to draw into and `Flush()`. `kernel/display.go` draws a four-quadrant test pattern with `image/draw` and flushes it (output-first; M10 adds input + a toolkit). Format `R8G8B8A8` matches `image.RGBA` byte-for-byte (no swizzle). QEMU-verified **end to end**: the smoke test boots headless (`-display none`), captures the scanout over QMP `screendump`, and asserts the rendered quadrant colors (`tools/screendump.py`) - proving real pixels reached the host framebuffer, not just that the control commands succeeded. Shell `fb`. |
+
+**Phase A + B + C complete (the everyday networked OS): M6 networking + M7 WASM/WASI + M8 host files. Phase D underway: M9 framebuffer.** Next: M10 GUI + input (a toolkit over `image/draw` + font, virtio-input).
 
 ## What boots today (M0+M1)
 
@@ -467,7 +469,49 @@ and no caching or attribute timeouts (every `ls` entry's size costs a `Tgetattr`
 This is the proven 9p interim; the virtio-fs device *backend* (honk serving its
 FS to guest VMs) lands in Phase E. **Phase C complete.**
 
-## Next: M9
+## Framebuffer (M9) - how it works
 
-Phase D - display/GUI. M9 framebuffer: a virtio-gpu driver to a `draw.Image` +
-a compositor, drawing a test pattern (output first, before input).
+`board/virt/virtiogpu.go` is honk's virtio-gpu driver; `kernel/display.go` is
+the thin presentation layer. It maps the display onto the stdlib (HONK.md §1:
+"the stdlib is the graphics engine"):
+
+- **The driver is a deep module.** It owns the entire virtio-gpu 2D control
+  protocol - on the shared virtio-mmio v2 transport (`virtio.go`), each command
+  is a 2-descriptor chain (request device-readable, reply device-writable)
+  published and polled to completion, exactly like the virtio-9p path. At
+  bring-up it reads display 0's resolution (falling back to 1024x768 when the
+  device reports no enabled display, e.g. headless), creates one scanout
+  resource, attaches the framebuffer as its backing (honk is identity-mapped, so
+  the Go slice is the backing at its own address - one contiguous mem entry, no
+  scatter list), and sets the scanout. The *entire* interface it exposes is
+  `Image() *image.RGBA` (the drawable surface) and `Flush()` (transfer-to-host +
+  resource-flush). The pixel format lives in exactly one place.
+- **The surface is the stdlib drawing target.** The resource format is
+  `VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM`, whose memory byte order R,G,B,A is
+  identical to `image.RGBA.Pix`, so the framebuffer's backing slice *is* the
+  image's pixels - drawing with `image/draw` writes the backing directly, with
+  no channel swizzle, and `Flush` makes it visible.
+- **Output first.** `InitDisplay` draws a four-quadrant test pattern (red /
+  green / blue / near-white) and flushes; the shell's `fb` redraws it. M9 is
+  deliberately output-only - input and a widget toolkit are M10.
+- **Verified end to end, headless.** QEMU keeps the graphical console surface in
+  memory even under `-display none`, so the smoke test boots honk with a
+  virtio-gpu device, captures the scanout over QMP `screendump`
+  (`tools/screendump.py`), and asserts the four quadrant colors read back
+  correctly. That proves the real pixels honk rendered reached the host
+  framebuffer - and that the pixel format is right - not merely that the control
+  commands returned OK. (No host unit test: the drawing is trivial stdlib calls;
+  the authoritative test is the captured frame, not re-asserting the draw calls
+  against themselves.)
+
+**Honest scope.** One full-screen scanout, whole-surface `Flush` (no damage
+rectangles), polled control queue (no IRQ), software rendering only (no virgl/3D
+- wazero/compute stays off the GPU). A damage-tracked partial flush, double
+buffering, and the cursor queue are future work; the toolkit + `virtio-input`
+land in M10.
+
+## Next: M10
+
+Phase D continues - GUI + input. A minimal toolkit over `image/draw` + a font,
+and `virtio-input` (IRQ -> channel -> dispatch -> focused widget), with an
+interactive demo you can click and type into.

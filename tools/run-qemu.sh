@@ -9,6 +9,11 @@
 #   HTTP  host port forwarded to honk's :80 httpd (default 8080)
 #   SHARE host directory shared into honk over 9p (default ./share)
 #
+# honk drives a virtio-gpu framebuffer (M9). Under -nographic it runs headless
+# (honk still draws the test pattern; see it with QMP `screendump`). To watch it
+# live, drop -nographic and add a UI, e.g.:
+#   SMP=4 qemu-system-riscv64 ... -serial mon:stdio -display cocoa  (or gtk/sdl)
+#
 # Quit an interactive session with Ctrl-A then x.
 # With the defaults, `curl http://localhost:8080/` reaches honk's HTTP server,
 # and the files under ./share appear inside honk (try `mount`, `ls`, `cat`).
@@ -48,5 +53,6 @@ exec qemu-system-riscv64 \
 	-device virtio-blk-device,drive=blk0 \
 	-netdev "user,id=n0,hostfwd=tcp::${HTTP:-8080}-:80" \
 	-device virtio-net-device,netdev=n0 \
+	-device virtio-gpu-device \
 	-fsdev local,id=hostdev,path="$SHARE",security_model=none \
 	-device virtio-9p-device,fsdev=hostdev,mount_tag=host
