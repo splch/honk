@@ -62,7 +62,7 @@ func exec(line string) {
 		fmt.Println("  help  harts  uptime  mem  echo <text>")
 		fmt.Println("  run [name]   ps   kill <pid>   crash   reap   stress [n]")
 		fmt.Println("  ls [dir]   cat <file>   cp <src> <dst>   put <key> <text>   rm <file>")
-		fmt.Println("  blk   net   mount   wasm <file.wasm>   fb   ui   reset --confirm   fault  exit")
+		fmt.Println("  blk   net   mount   wasm <file.wasm>   fb   ui   vm   reset --confirm   fault  exit")
 	case "harts":
 		fmt.Printf("harts: %d online  GOMAXPROCS=%d  this=hart %d\n",
 			virt.NumHarts(), runtime.GOMAXPROCS(-1), virt.CurrentHart())
@@ -123,6 +123,8 @@ func exec(line string) {
 		fbcmd()
 	case "ui":
 		uicmd()
+	case "vm":
+		vmcmd()
 	case "ls":
 		ls(fields)
 	case "cat":

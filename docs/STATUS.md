@@ -8,7 +8,7 @@ Living record of what is implemented and verified, and what is next. See
 ```sh
 make run        # build + boot under QEMU virt (Ctrl-A x to quit)
 make test       # host race tests of every pure-Go package
-make smoke      # build + boot + assert M0-M10 output (CI gate)
+make smoke      # build + boot + assert M0-M11 output (CI gate)
 make phase-a    # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
 make vet        # go vet under the tamago toolchain
 ```
@@ -66,7 +66,9 @@ M0-M5 smoke test. The split is by where the authority for correctness lives:
 
 | **M10 GUI + input** | ✅ **complete** | **virtio-input + a minimal `image/draw` toolkit.** honk's virtio-input driver (`board/virt/virtioinput.go`, polled like the other virtio devices - a queue-backed device loses nothing without an IRQ) surfaces raw evdev events from QEMU's virtio-keyboard + virtio-tablet. `kernel/gui` is a pure-Go retained-mode toolkit (a `UI` routing pointer/key events to widgets, `Button` + `TextField`, text via `x/image/font/basicfont`) rendering into any `draw.Image`; `kernel/ui.go` translates evdev -> `gui.Event` (keycode->rune, tablet axes->pixels) and pumps them into an interactive demo on the M9 framebuffer. Host race-tested (event dispatch, focus routing, **and rendered pixels** in an in-memory image). QEMU-verified end to end and headless: the smoke test injects a click + typed text over QMP `input-send-event`, asserts honk logged them (serial) and that the click's green reached the host framebuffer (screendump, `tools/uitest.py`). Shell `ui`. |
 
-**Phase A + B + C complete (the everyday networked OS): M6 networking + M7 WASM/WASI + M8 host files. Phase D complete: M9 framebuffer + M10 GUI/input.** Next: Phase E - M11 H-extension hypervisor bring-up (the only paging in honk).
+| **M11 H-ext bring-up** | ✅ **complete** | **The first pure-Go RISC-V hypervisor.** honk hosts a VS-mode guest under the H-extension: it builds an Sv39x4 G-stage map (`hgatp`, guest-physical → supervisor-physical), world-switches HS↔VS via a dedicated trap vector + `sscratch` trampoline (`board/virt/vmm_riscv64.s`), and trap-and-emulates the guest's SBI calls. A tiny hand-rolled VS-mode payload (`kernel/vmm.DemoGuest`) prints a line via emulated SBI `console_putchar` and halts via SBI shutdown - proving H-ext enable, two-stage paging, and trap-and-emulate against code honk fully controls. The guest/page-table encoders (`kernel/vmm`) are host race-tested; the run is QEMU-verified end to end and smoke-gated. Shell `vm`. **The only paging in honk.** |
+
+**Phase A + B + C complete (the everyday networked OS): M6 networking + M7 WASM/WASI + M8 host files. Phase D complete: M9 framebuffer + M10 GUI/input. Phase E begun: M11 H-extension bring-up.** Next: M12 - a small real guest (rCore/RT-Thread): exercise SBI, a timer, and a driver path.
 
 ## What boots today (M0+M1)
 
@@ -555,9 +557,52 @@ order, no scrolling/resize/IME/clipboard, lowercase + digits + space only (no
 shift/modifiers), polled input. Enough to click and type; a real toolkit (more
 widgets, layout, theming) is future work.
 
-## Next: M11
+## Hypervisor (M11) - how it works
 
-Phase E - the hypervisor (the only paging in honk; the first pure-Go RISC-V
-VMM). M11: enable the H-extension, set up two-stage paging (`hgatp`), and
-trap-and-emulate a trivial hand-rolled VS-mode payload that prints via an
-emulated SBI console - proving the mechanism in isolation before a real guest.
+Phase E is the only place honk uses paging: it appears inside the hypervisor to
+give a guest its (G-stage) memory. `board/virt/vmm.go` + `vmm_riscv64.s` are the
+bare-metal half; `kernel/vmm` is the pure, host-tested half (HONK.md §1: the
+hardware is in QEMU, the logic is host-tested).
+
+- **G-stage paging (the only paging in honk).** `RunGuest` builds an Sv39x4
+  guest-physical→supervisor-physical map - a 16 KiB root + one level-1 table
+  with a single 2 MiB megapage backing the guest's RAM - and points `hgatp` at
+  it (`HFENCE.GVMA` after the MODE change). The guest sees its RAM at
+  `0x80000000` like a real machine; G-stage translates that to a honk DMA
+  buffer. G-stage leaf PTEs set the **U bit** (G-stage accesses are checked as
+  U-mode - the classic silent-fault trap) and pre-set A/D (Svade-portable).
+  `vsatp=0` (Bare) leaves VS-stage off, so this is one stage of real paging.
+- **The HS↔VS world switch.** A guest is a goroutine pinned to one hart
+  (`runtime.LockOSThread`; CSRs and `sscratch` are hart-local). `guestEnter`
+  saves honk's HS context (the only Go-relied registers: SP/GP/TP/g + RA) into a
+  `vcpu` frame, parks the frame pointer in `sscratch`, loads the guest's 31
+  GPRs, and `sret`s into VS-mode (`hstatus.SPV=1` + `sstatus.SPP=1`). On a guest
+  trap, a dedicated `stvec` (`guestVec`, installed only for the run) saves the
+  guest GPRs and restores honk's context - so `guestEnter` "returns" via the
+  trap. honk's own trap vector is untouched; HS interrupts are masked during the
+  guest (no preemption needed for M11).
+- **Trap-and-emulate.** The guest's `ecall` (scause 10, ecall-from-VS; OpenSBI's
+  `medeleg` delegates it to HS) returns control to the run loop, which reads the
+  guest's `a7`/`a0` from the frame and emulates the legacy SBI: `console_putchar`
+  prints to honk's console and advances the guest pc by 4; `shutdown` ends the
+  run. Any other trap (e.g. a guest-page fault, 20/21/23) is reported with
+  `scause`/`sepc`/`stval`/`htval` - a clean diagnostic instead of a hang.
+- **Proof.** `kernel/vmm` is pure Go: `go test -race ./kernel/vmm` decodes the
+  generated guest program instruction-by-instruction and checks the Sv39x4 PTE
+  bits and indices (a wrong U bit or index is exactly the "works on QEMU /
+  silent fault" class). The smoke test boots with `-cpu rv64,h=true`, runs
+  `vm`, and asserts the guest's `console_putchar` output and the SBI-shutdown
+  exit - so the whole path (H-ext enable → `hgatp` → `sret` into VS → guest
+  fetch through G-stage → ecall → trap-and-emulate → resume → halt) is proven.
+  Shell: `vm`.
+
+**Honest scope.** One guest, one vCPU (a goroutine), a single 2 MiB G-stage
+megapage, emulated SBI console + shutdown, HS interrupts masked during the run
+(no timer-driven exit yet), and a payload honk fully controls. A real guest OS,
+VS-stage paging (`vsatp`), PLIC/AIA + virtio device backends, and a timer-driven
+scheduler land in M12 (small guest) and M13 (Linux + virtio-fs).
+
+## Next: M12
+
+A small real guest (rCore or RT-Thread): exercise SBI, a timer, and a simple
+driver path on top of the M11 mechanism, with the vCPU as a goroutine.

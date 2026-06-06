@@ -15,7 +15,7 @@ honk boots as an **HS-mode payload under OpenSBI** on the QEMU `virt` machine.
 make run              # build + boot under QEMU (Ctrl-A x to quit)
 make test             # host race tests of every pure-Go package
 make phase-a          # Phase A (M0/M1/M2) acceptance: race tests + QEMU boot matrix
-make smoke            # build + boot + assert M0-M10 output (CI gate)
+make smoke            # build + boot + assert M0-M11 output (CI gate)
 ```
 
 Needs a host Go toolchain and `qemu-system-riscv64`. The TamaGo Go distribution
@@ -30,6 +30,9 @@ kernel/        the HS-mode Go program (the OS): boot, SMP demo, shell
 kernel/net.go  networking: virtio-net + gVisor (go-net) -> stdlib net + net/http
 kernel/wasm.go untrusted-code tier: wazero (WASI preview 1), capability-gated
 kernel/display.go  framebuffer: virtio-gpu -> image.RGBA + a test pattern (M9)
+kernel/vm.go   hypervisor demo: launch a VS-mode guest via the H-extension (M11)
+kernel/vmm/    pure VMM logic: guest payload + Sv39x4 G-stage tables (host-tested)
+board/virt/vmm*  H-extension VMM: hgatp G-stage paging + the HS<->VS world switch
 kernel/ui.go   GUI demo: virtio-input events -> the image/draw toolkit (M10)
 kernel/gui/    minimal retained-mode widget toolkit over image/draw (host-tested)
 kernel/proc/   process model: goroutine + context + capabilities (host-tested)
@@ -46,7 +49,7 @@ docs/STATUS.md what works today and what's next
 GO.md RV64.md OS.md   language / hardware / domain references
 ```
 
-Status: **Phase A-D complete (M0-M10)** - HS-mode boot under
+Status: **Phase A-D complete (M0-M10), Phase E begun (M11)** - HS-mode boot under
 OpenSBI, SMP across all harts, an interrupt-driven UART console + shell, a
 process model (goroutine + context + capabilities, `recover()` fault domains), a
 persistent block device (NVMe-over-PCIe + virtio-blk fallback), a crash-safe
@@ -63,10 +66,14 @@ virtio-gpu driver presenting the scanout as a stdlib `image.RGBA` it draws a
 test pattern into (output-first), and **GUI + input** - a polled virtio-input
 driver (keyboard + tablet) feeding a minimal pure-Go `image/draw` toolkit
 (`kernel/gui`: a focus-routing `UI`, a `Button`, a `TextField`, bitmap-font
-text), with an interactive demo you can click and type into. `make run` drops
-you at a `honk>` prompt; try `help`, `mount`, `ls`, `cat motd`, `net`, `wasm
-hello.wasm`, `fb`, `ui`, `reset --confirm`, and `curl http://localhost:8080/`.
-**Phase D (display + GUI) is complete** - both verified headlessly by QMP
-(screendump of the rendered framebuffer, and `input-send-event` injection of a
-click + keystrokes); next: Phase E - the H-extension hypervisor (M11). See
-`docs/STATUS.md`.
+text), with an interactive demo you can click and type into, and the start of
+**Phase E - the hypervisor** (M11): honk hosts a VS-mode guest via the RISC-V
+H-extension, building an Sv39x4 G-stage page table (`hgatp`; the only paging in
+honk), world-switching HS↔VS, and trap-and-emulating the guest's SBI calls -
+proven by a tiny hand-rolled guest that prints via emulated SBI and halts. `make
+run` drops you at a `honk>` prompt; try `help`, `mount`, `ls`, `cat motd`,
+`net`, `wasm hello.wasm`, `fb`, `ui`, `vm`, `reset --confirm`, and `curl
+http://localhost:8080/`. **Phase D (display + GUI) is complete** and **Phase E
+is under way** - all verified headlessly (QMP screendump + input injection for
+the GUI; an H-extension guest run for the VMM); next: M12 - a small real guest.
+See `docs/STATUS.md`.

@@ -17,7 +17,7 @@ SMP="${SMP:-4}"
 # Host race tests of the pure-Go stack (M1 console ring, M2 proc, M4 kv + vfs,
 # M5 image verity).
 echo "== go test -race ./kernel/... ./board/virt/ring ./block =="
-go test -race -count=1 ./kernel/proc/ ./board/virt/ring/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./kernel/p9/ ./block/ ||
+go test -race -count=1 ./kernel/proc/ ./board/virt/ring/ ./kernel/kv/ ./kernel/vfs/ ./kernel/image/ ./kernel/p9/ ./kernel/vmm/ ./block/ ||
 	{ echo "SMOKE FAIL: host race tests" >&2; exit 1; }
 
 tools/build.sh >/dev/null
@@ -29,10 +29,10 @@ env -u GOOS -u GOARCH -u GOOSPKG go run ./tools/mkimage -version 1 kernel/core "
 
 NVME="$(mktemp)" RNVME="$(mktemp)" VB="$(mktemp)" AB="$(mktemp)"
 A="$(mktemp)" P="$(mktemp)" B="$(mktemp)" R="$(mktemp)" S1="$(mktemp)" S2="$(mktemp)" N="$(mktemp)"
-H="$(mktemp)" HNVME="$(mktemp)" HSHARE="$(mktemp -d)"
+H="$(mktemp)" HNVME="$(mktemp)" HSHARE="$(mktemp -d)" VV="$(mktemp)"
 G="$(mktemp)" GSER="$(mktemp)" GNVME="$(mktemp)" GPUPPM="$(mktemp).ppm" GPUSOCK="$(mktemp -u).qmp"
 UOUT="$(mktemp)" USRL="$(mktemp)" UNVME="$(mktemp)" UPPM="$(mktemp).ppm" USOCK="$(mktemp -u).qmp"
-trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$N" "$AIMG" "$BIMG" "$H" "$HNVME" "$G" "$GSER" "$GNVME" "$GPUPPM" "$GPUSOCK" "$UOUT" "$USRL" "$UNVME" "$UPPM" "$USOCK"; rm -rf "$HSHARE"' EXIT
+trap 'rm -f "$NVME" "$RNVME" "$VB" "$AB" "$A" "$P" "$B" "$R" "$S1" "$S2" "$N" "$AIMG" "$BIMG" "$H" "$HNVME" "$VV" "$G" "$GSER" "$GNVME" "$GPUPPM" "$GPUSOCK" "$UOUT" "$USRL" "$UNVME" "$UPPM" "$USOCK"; rm -rf "$HSHARE"' EXIT
 dd if=/dev/zero of="$NVME" bs=1048576 count=16 2>/dev/null
 dd if=/dev/zero of="$VB" bs=1048576 count=16 2>/dev/null
 
@@ -119,6 +119,18 @@ boot $'\nblk\nexit\n' "$B" \
 want "$B" "virtio-blk" <<'EOF'
 storage = virtio-blk
 blk: read/write self-test OK
+EOF
+
+# Run V: hypervisor (M11). Launch a VS-mode guest under the H-extension (the
+# boot cpu is rv64,h=true). The guest prints a line via emulated SBI
+# console_putchar and halts via SBI shutdown - proving H-ext enable, hgatp
+# Sv39x4 G-stage paging, the HS<->VS world switch, and trap-and-emulate end to
+# end. No devices needed; the guest runs from a G-stage-mapped RAM buffer.
+boot $'\nvm\nexit\n' "$VV"
+want "$VV" "vmm/M11" <<'EOF'
+launching a VS-mode guest
+hello from a guest VM
+guest halted (SBI shutdown)
 EOF
 
 # Run R: stateless reset clears the writable layer; the immutable core remains.

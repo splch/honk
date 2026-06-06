@@ -459,6 +459,27 @@ is front-loaded; the OS logic on top of it is small because it is Go.
 12. **M11 H-ext bring-up.** A trivial hand-rolled VS-mode payload that spins and
     prints via an emulated SBI console - proves H-ext enable, two-stage paging
     (`hgatp`), and trap-and-emulate in isolation, against code you fully control.
+    - *Status:* **COMPLETE + verified.** honk hosts a VS-mode guest under the
+      H-extension - **the first pure-Go RISC-V hypervisor.** `board/virt/vmm.go`
+      builds an **Sv39x4 G-stage** map (`hgatp`, guest-physical -> supervisor-
+      physical; a 16 KiB root + one 2 MiB megapage backing guest RAM at
+      `0x80000000`), world-switches HS<->VS via a dedicated guest trap vector +
+      `sscratch` trampoline (`board/virt/vmm_riscv64.s`: `guestEnter`/`guestVec`
+      save/restore the full guest GPR file; honk's own trap path is untouched),
+      and trap-and-emulates the guest's SBI (`ecall` from VS = scause 10,
+      delegated to HS by OpenSBI's `medeleg`): legacy `console_putchar` ->
+      honk's console, `shutdown` -> end the run. The guest is pinned to one hart
+      (`runtime.LockOSThread`; CSRs/`sscratch` are hart-local) and runs with HS
+      interrupts masked (no preemption needed for M11). G-stage leaf PTEs set
+      the **U bit** (G-stage accesses are checked as U-mode) and pre-set A/D
+      (Svade-portable); `HFENCE.GVMA` orders the MODE change. The encodable
+      logic - the hand-rolled guest program and the Sv39x4 tables - is the pure,
+      host race-tested `kernel/vmm` package (decodes the guest instruction-by-
+      instruction; checks PTE bits/indices); the world switch is QEMU-verified
+      end to end and smoke-gated (`-cpu rv64,h=true`, run `vm`, assert the
+      guest's output + SBI-shutdown exit). The Go assembler already knows the
+      H/VS CSR names, so no `tamago-go` fork was needed. Shell `vm`. **This is
+      the only paging in honk.** See `docs/STATUS.md`.
 13. **M12 Small guest.** rCore or RT-Thread: exercise SBI, a timer, and a simple
     driver path. vCPU = goroutine.
 14. **M13 Linux + virtio-fs.** Full device tree, PLIC/AIA emulation,
