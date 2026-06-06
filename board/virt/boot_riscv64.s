@@ -48,6 +48,16 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOV	$(1<<1), T0
 	CSRRS	T0, SSTATUS, ZERO	// sstatus.SIE (global S-mode interrupts)
 
+	// sscratch = top of this hart's dedicated trap stack (trap.go); trapEntry
+	// swaps onto it so traps never run on the interrupted goroutine's stack.
+	// (SLLI $14 must match trapStackSize = 1<<14.)
+	ADD	$1, X10, T3
+	SLLI	$14, T3, T3		// (hartid+1) * trapStackSize
+	MOV	$·trapStacks(SB), T2
+	ADD	T3, T2
+	AND	$-16, T2
+	CSRRW	T2, SSCRATCH, ZERO
+
 	// Boot (g0) stack at the top of usable RAM. OpenSBI places the DTB (a1,
 	// stashed in bootDTB) at the top of RAM; the g0 stack sits just below it,
 	// and the runtime grows the heap upward to g0.stack.lo - so the stack must
@@ -82,6 +92,14 @@ TEXT secondaryEntry(SB),NOSPLIT|NOFRAME,$0
 	// secondary harts: only the boot hart services the UART)
 	MOV	$trapEntry(SB), T0
 	CSRRW	T0, STVEC, ZERO
+
+	// sscratch = top of this hart's dedicated trap stack (as in cpuinit).
+	ADD	$1, X10, T3
+	SLLI	$14, T3, T3		// (hartid+1) * trapStackSize
+	MOV	$·trapStacks(SB), T2
+	ADD	T3, T2
+	AND	$-16, T2
+	CSRRW	T2, SSCRATCH, ZERO
 
 	SLLI	$2, X10, T4		// T4 = hartid*4 (uint32 index)
 	SLLI	$3, X10, T5		// T5 = hartid*8 (uint64 index)

@@ -6,6 +6,18 @@ package virt
 
 import "sync/atomic"
 
+// trapStacks are per-hart interrupt stacks. trapEntry switches to its hart's
+// stack via sscratch (set in cpuinit/secondaryEntry) so the handler never runs
+// on - and so can never overflow or corrupt - the interrupted goroutine's
+// stack. honk has no MMU guard pages, so this is the only thing standing
+// between a deep trap and silent memory corruption; every interrupt source in
+// the roadmap (NVMe, virtio-gpu/input/net, the VMM) lands here.
+//
+// trapStackSize is 1<<14; the SLLI shift in boot_riscv64.s MUST match.
+const trapStackSize = 1 << 14
+
+var trapStacks [maxHarts][trapStackSize]byte
+
 // implemented in trap_riscv64.s
 func trapEntryPC() uintptr
 func triggerFault()

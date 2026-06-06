@@ -82,12 +82,17 @@ QEMU `-m` (verified at 256M/512M/1G/2G), needs no FDT parsing, and leaves the
 DTB intact. (Note: tamago's allocator grows the heap up to `g0.stack.lo`, so
 the g0 stack must be at the top of RAM, above the heap.)
 
-**Deferred hardening (tracked, not yet done):** the trap handler runs on the
-interrupted goroutine's stack (relying on the runtime's nosplit red zone, as
-TamaGo's own IRQ path does) rather than a dedicated per-hart interrupt stack;
-and idle harts busy-poll rather than `WFI`. Neither is a correctness bug in the
-tested configs, but both are worth closing as interrupts become frequent in
-Phase B+.
+The trap handler now runs on a **dedicated per-hart trap stack** (trap.go
+`trapStacks`, selected via `sscratch`), so a trap never touches the interrupted
+goroutine's stack - important because honk has no MMU guard pages and every
+roadmap interrupt source (NVMe, virtio-gpu/input/net, the VMM) lands here.
+
+**Deferred hardening (needs a tamago-go runtime fork):** idle harts busy-spin
+in the runtime's `semasleep` rather than `WFI`. This is not a honk policy choice
+- tamago wakes idle Ms with `semawakeup` (a shared-memory atomic, not an
+interrupt), so `WFI` would require teaching `semawakeup` to send an IPI, i.e. a
+runtime fork. Tracked as a power-management fork item alongside the (also
+sanctioned) SMP work; not a correctness bug.
 
 ## Process model (M2) - how it works
 

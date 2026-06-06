@@ -19,6 +19,12 @@
 // nosplit and FP-free, so the interrupted goroutine's callee-saved and FP state
 // are preserved untouched.
 TEXT trapEntry(SB),NOSPLIT|NOFRAME,$0
+	// Switch to this hart's dedicated trap stack (sscratch holds its top, set
+	// in cpuinit/secondaryEntry); sscratch now holds the interrupted sp. The
+	// handler thus never touches the interrupted goroutine's stack. SIE is 0
+	// during the trap, so no nested interrupt reuses sscratch.
+	CSRRW	X2, SSCRATCH, X2
+
 	ADD	$-256, SP
 	MOV	T0, 16(SP)		// save T0 before we clobber it with scause
 	CSRRS	ZERO, SCAUSE, T0	// T0 = scause
@@ -65,6 +71,10 @@ interrupt:
 	MOV	120(SP), A6
 	MOV	128(SP), A7
 	ADD	$256, SP
+
+	// Restore the interrupted sp; sscratch goes back to the trap stack top for
+	// the next trap.
+	CSRRW	X2, SSCRATCH, X2
 	WORD	$0x10200073		// sret (no assembler mnemonic encoding)
 
 // func trapEntryPC() uintptr  - stvec value (4-byte aligned, Direct mode).
