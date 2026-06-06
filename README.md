@@ -174,6 +174,7 @@ A C/Rust equivalent is six figures.
 |---|---|
 | [`docs/HONK.md`](docs/HONK.md) | The full design: the mapping, architecture, reuse-vs-write, roadmap, risks. |
 | [`docs/STATUS.md`](docs/STATUS.md) | Living build status — what is implemented and verified, milestone by milestone. |
+| [`docs/V1.md`](docs/V1.md) | Proposed v1 release requirements: what honk must do to be an everyday OS for the average person, and the order to build it. |
 | [`docs/RV64.md`](docs/RV64.md) | Build-oriented RISC-V 64 reference (boot, SBI, traps, paging, virtio, H-ext). |
 | [`docs/GO.md`](docs/GO.md) | Go language rules + modern idioms and the quality bar honk holds. |
 | [`docs/OS.md`](docs/OS.md) | What a modern OS is for; the small-TCB, memory-safe-kernel thesis. |
