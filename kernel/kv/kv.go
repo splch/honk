@@ -309,6 +309,9 @@ func (s *Store) commit(batch []*writeReq) error {
 	if err := s.dev.WriteBlocks(base, recs); err != nil {
 		return err
 	}
+	if err := s.dev.Flush(); err != nil { // durable before we acknowledge the batch
+		return err
+	}
 	s.head += off
 
 	next := s.copyIndex()
@@ -411,6 +414,11 @@ func (s *Store) compact(batch []*writeReq) error {
 		off += nb
 	}
 
+	// The new region must be durable before the superblock points at it, or a
+	// host crash could leave the pointer referencing unflushed data.
+	if err := s.dev.Flush(); err != nil {
+		return err
+	}
 	if err := s.writeSuper(other, s.gen+1); err != nil {
 		return err
 	}
@@ -419,11 +427,15 @@ func (s *Store) compact(batch []*writeReq) error {
 	return nil
 }
 
+// writeSuper durably writes the superblock to its (generation-selected) slot.
 func (s *Store) writeSuper(active int, gen uint64) error {
 	buf := make([]byte, s.bs)
 	binary.LittleEndian.PutUint32(buf[0:], sbMagic)
 	binary.LittleEndian.PutUint64(buf[8:], gen)
 	buf[16] = byte(active)
 	binary.LittleEndian.PutUint32(buf[4:], crc32.ChecksumIEEE(buf[8:17]))
-	return s.dev.WriteBlocks(int64(gen%sbSlots), buf)
+	if err := s.dev.WriteBlocks(int64(gen%sbSlots), buf); err != nil {
+		return err
+	}
+	return s.dev.Flush()
 }

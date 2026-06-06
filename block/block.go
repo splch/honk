@@ -31,4 +31,8 @@ type Device interface {
 	ReadBlocks(start int64, p []byte) error
 	// WriteBlocks writes len(p)/BlockSize blocks from p starting at start.
 	WriteBlocks(start int64, p []byte) error
+	// Flush makes all prior writes durable on the media (a device cache flush /
+	// write barrier). A write is only guaranteed to survive host power loss
+	// once a subsequent Flush returns.
+	Flush() error
 }

@@ -107,6 +107,28 @@ func TestTornTailDiscarded(t *testing.T) {
 	mustMissing(t, s, "c")
 }
 
+func TestDurableWrites(t *testing.T) {
+	dev := block.NewMemory(64, 512)
+	s := open(t, dev)
+	defer s.Close()
+
+	// Open formats a fresh device and must flush the superblock durably.
+	if dev.Flushes() == 0 {
+		t.Fatal("Open did not flush the formatted superblock")
+	}
+	before := dev.Flushes()
+	if err := s.Put("a", []byte("1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("b", []byte("2")); err != nil {
+		t.Fatal(err)
+	}
+	// Each acknowledged Put is durable: its batch flushed before returning.
+	if dev.Flushes() < before+2 {
+		t.Fatalf("flushes %d -> %d, want >= +2 (one per Put batch)", before, dev.Flushes())
+	}
+}
+
 func TestDiskResidentValues(t *testing.T) {
 	dev := block.NewMemory(256, 512)
 	s := open(t, dev)

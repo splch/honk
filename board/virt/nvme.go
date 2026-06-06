@@ -40,6 +40,7 @@ const (
 	opCreateIOSQ = 0x01
 	opCreateIOCQ = 0x05
 	opIdentify   = 0x06
+	opFlush      = 0x00
 	opWrite      = 0x01
 	opRead       = 0x02
 )
@@ -147,6 +148,19 @@ func (d *nvmeDevice) init() bool {
 
 func (d *nvmeDevice) BlockSize() int { return d.bs }
 func (d *nvmeDevice) Blocks() int64  { return d.blocks }
+
+// Flush commits the controller's volatile write cache to media.
+func (d *nvmeDevice) Flush() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.submit(&d.io, func(c []byte) {
+		c[0] = opFlush
+		binary.LittleEndian.PutUint32(c[4:], d.nsid)
+	}) != 0 {
+		return block.ErrIO
+	}
+	return nil
+}
 
 func (d *nvmeDevice) ReadBlocks(start int64, p []byte) error {
 	return d.rw(opRead, start, p)

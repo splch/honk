@@ -1,12 +1,16 @@
 package block
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // Memory is an in-RAM block.Device, used to test the storage stack on the host.
 type Memory struct {
 	mu        sync.Mutex
 	blockSize int
 	data      []byte
+	flushes   atomic.Int64
 }
 
 // NewMemory returns a zeroed in-memory device of the given geometry.
@@ -36,6 +40,16 @@ func (m *Memory) WriteBlocks(start int64, p []byte) error {
 	m.mu.Unlock()
 	return nil
 }
+
+// Flush is a no-op (RAM is durable within the process) but counts calls so
+// tests can assert the storage stack's flush behavior.
+func (m *Memory) Flush() error {
+	m.flushes.Add(1)
+	return nil
+}
+
+// Flushes returns how many times Flush has been called.
+func (m *Memory) Flushes() int64 { return m.flushes.Load() }
 
 func (m *Memory) check(start int64, p []byte) error {
 	if len(p) == 0 || len(p)%m.blockSize != 0 {

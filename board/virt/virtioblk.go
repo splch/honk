@@ -69,10 +69,13 @@ const (
 	descWrite = 2
 )
 
-// virtio-blk request types and status.
+// virtio-blk request types and the optional flush feature.
 const (
-	blkTypeIn  = 0 // read (device -> memory)
-	blkTypeOut = 1 // write (memory -> device)
+	blkTypeIn    = 0 // read (device -> memory)
+	blkTypeOut   = 1 // write (memory -> device)
+	blkTypeFlush = 4 // flush the device write cache
+
+	virtioBlkFFlush = 1 << 9 // VIRTIO_BLK_F_FLUSH
 )
 
 const virtioBlockSize = 512 // virtio-blk sector size
@@ -81,8 +84,9 @@ const virtioBlockSize = 512 // virtio-blk sector size
 type virtioBlk struct {
 	base uintptr
 
-	mu     sync.Mutex
-	blocks int64
+	mu       sync.Mutex
+	blocks   int64
+	canFlush bool // device negotiated VIRTIO_BLK_F_FLUSH
 
 	// queue size and the three pinned, DMA-addressable virtqueue areas.
 	qn    uint16
@@ -142,11 +146,17 @@ func (d *virtioBlk) init() bool {
 	d.setStatus(statusAck)
 	d.setStatus(statusDriver)
 
-	// negotiate features: accept only VIRTIO_F_VERSION_1.
-	if d.deviceFeatures()&virtioFVersion1 == 0 {
+	// negotiate features: VIRTIO_F_VERSION_1 (required) plus FLUSH if offered.
+	df := d.deviceFeatures()
+	if df&virtioFVersion1 == 0 {
 		return false
 	}
-	d.setDriverFeatures(virtioFVersion1)
+	drv := uint64(virtioFVersion1)
+	if df&virtioBlkFFlush != 0 {
+		drv |= virtioBlkFFlush
+		d.canFlush = true
+	}
+	d.setDriverFeatures(drv)
 	d.setStatus(statusFeaturesOK)
 	if mmioRead32(d.base+regStatus)&statusFeaturesOK == 0 {
 		return false
@@ -222,15 +232,40 @@ func (d *virtioBlk) transfer(typ uint32, start int64, p []byte) error {
 	d.setDesc(0, ptr(d.hdr), 16, descNext, 1)
 	d.setDesc(1, ptr(p), uint32(len(p)), dataFlags, 2)
 	d.setDesc(2, ptr(d.status), 1, descWrite, 0)
+	return d.doRequest()
+}
 
-	// publish head descriptor 0 and notify the device.
+// Flush issues a VIRTIO_BLK_T_FLUSH so prior writes reach the media. It is a
+// no-op if the device did not negotiate the flush feature (then writes have no
+// volatile cache to flush).
+func (d *virtioBlk) Flush() error {
+	if !d.canFlush {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	binary.LittleEndian.PutUint32(d.hdr[0:], blkTypeFlush)
+	binary.LittleEndian.PutUint32(d.hdr[4:], 0)
+	binary.LittleEndian.PutUint64(d.hdr[8:], 0)
+	d.status[0] = 0xff
+
+	// flush has no data buffer: a 2-descriptor chain (header, status).
+	d.setDesc(0, ptr(d.hdr), 16, descNext, 1)
+	d.setDesc(1, ptr(d.status), 1, descWrite, 0)
+	return d.doRequest()
+}
+
+// doRequest publishes descriptor chain head 0 to the available ring, notifies
+// the device, polls the used ring for completion, and returns the request
+// status. The caller holds d.mu and has populated the descriptor chain.
+func (d *virtioBlk) doRequest() error {
 	binary.LittleEndian.PutUint16(d.avail[4+2*(d.availIdx%d.qn):], 0)
 	d.availIdx++
 	binary.LittleEndian.PutUint16(d.avail[2:], d.availIdx) // avail.idx
 	fence()
 	mmioWrite32(d.base+regQueueNotify, 0)
 
-	// poll the used ring for completion.
 	for spins := 0; binary.LittleEndian.Uint16(d.used[2:]) == d.usedSeen; spins++ {
 		if spins > 1<<24 {
 			return block.ErrIO
