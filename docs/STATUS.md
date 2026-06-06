@@ -765,15 +765,47 @@ the path a virtio backend uses to report completion.
   decodes its structure; the smoke test runs `vm irq` and asserts
   `guest IRQs: ###` (three injected + acked interrupts). Shell: `vm irq`.
 
+## Toward M13: a virtio device backend - how it works
+
+The capstone of the device-emulation work: honk emulating a real virtio
+split-virtqueue device for a guest, composing every Phase-E keystone into one
+round trip. The device is a console transmit queue (the guest sends bytes; honk
+prints them).
+
+- **The virtqueue parse is pure logic.** `vmm` gains split-virtqueue accessors
+  (`VirtqAvailIdx`/`VirtqAvailRing`/`VirtqDesc`/`VirtqUsedPush`) over a guest-RAM
+  byte slice - nosplit, manual little-endian, host-tested by laying a queue out
+  exactly as the guest does and reading it back. A guest-supplied descriptor
+  *address* is validated with `GuestRange` before honk follows it, and a
+  guest-supplied descriptor *index* is bounded against `VirtqSize`, so a bad
+  ring can't drive an out-of-bounds access.
+- **The round trip composes the keystones.** The guest lays a descriptor +
+  buffer + avail ring in its own RAM, then stores to an emulated
+  `MMIORegNotify` register (a virtio QueueNotify). honk catches that store
+  (MMIO trap-and-emulate), drains the avail ring, reads each descriptor and its
+  buffer from guest memory (`GuestRange`), prints the bytes, publishes the used
+  ring, and raises a completion interrupt (`hvip.VSEIP`). The guest takes the
+  interrupt, acks the device with an MMIO status read (honk withdraws the
+  injection), and halts. The drain is bounded by the queue size, so it stays
+  inside the nosplit guest-run region safely.
+- **Proof.** `go test -race ./kernel/vmm` lays out a queue and runs the
+  accessors the backend uses (descriptor found, buffer validated+read, used ring
+  published) and decodes the payload's stores; the smoke test runs `vm virtio`
+  and asserts `guest console: vq!` - the buffer the guest queued, printed only
+  because honk parsed the virtqueue from guest memory and ran the full
+  notify -> consume -> used -> completion-IRQ -> ack cycle. Shell: `vm virtio`.
+
 ## Next: M13
 
-A real guest (Linux): a full guest device tree, PLIC/AIA + virtio device
-backends, and virtio-fs so the guest transparently mounts honk's files - the
-escape hatch for the long tail of real software. Every device mechanism is now
-in place - two-stage paging (`vm paging`), reading guest memory by guest pointer
-(`vm dbcn`), MMIO trap-and-emulate (`vm mmio`), and device-interrupt injection
-(`vm irq`) - so the next step is a real emulated **virtio device** (its mmio
-registers via `DecodeMMIO`, a split virtqueue parsed from guest memory via
-`GuestRange`, completion signalled via `hvip.VSEIP`), then a guest device tree
-and time-sharing a hart between a vCPU and other honk goroutines (the run loop
-is still one non-descheduling region).
+Every hypervisor *mechanism* M13 needs is now implemented and proven against a
+hand-rolled guest: two-stage paging (`vm paging`), reading guest memory by guest
+pointer (`vm dbcn`), MMIO trap-and-emulate (`vm mmio`), external-interrupt
+injection (`vm irq`), and a virtio split-virtqueue device backend (`vm virtio`).
+What remains for M13 is *integration* of these into a real guest: loading an
+actual Linux (or rCore) kernel image, a full guest device tree describing the
+emulated devices, a richer interrupt controller (PLIC/AIA) and the standard
+virtio-mmio register handshake a stock driver expects, a virtio-fs backend, and
+time-sharing a hart between a long-running vCPU and other honk goroutines (the
+run loop is still one non-descheduling region). That step needs an external
+kernel image and lands as the M13 deliverable; the mechanisms it stands on are
+done.

@@ -223,6 +223,65 @@ func SignExtend(val uint64, width int, signed bool) uint64 {
 	return val
 }
 
+// Split-virtqueue accessors honk's virtio backend uses to parse a queue from
+// guest RAM (mem; offsets are guest-RAM offsets, i.e. GPA - GuestBase). They are
+// nosplit (the backend runs in the guest-run region) and do manual
+// little-endian byte access. A guest-supplied descriptor address is NOT trusted
+// here - the backend validates it with GuestRange before following it - and the
+// caller must bound a guest-supplied descriptor index against VirtqSize.
+
+// VirtqAvailIdx reads the avail ring's producer index (avail.idx).
+//
+//go:nosplit
+func VirtqAvailIdx(mem []byte, availOff int) uint16 { return le16(mem, availOff+2) }
+
+// VirtqAvailRing reads the descriptor head in avail.ring[slot].
+//
+//go:nosplit
+func VirtqAvailRing(mem []byte, availOff int, slot uint16) uint16 {
+	return le16(mem, availOff+4+int(slot)*2)
+}
+
+// VirtqDesc reads descriptor i: its buffer address (guest-physical), length,
+// flags, and next index.
+//
+//go:nosplit
+func VirtqDesc(mem []byte, descOff int, i uint16) (addr uint64, length uint32, flags, next uint16) {
+	o := descOff + int(i)*16
+	return le64(mem, o), le32(mem, o+8), le16(mem, o+12), le16(mem, o+14)
+}
+
+// VirtqUsedPush writes used.ring[slot] = {id, length} and publishes used.idx,
+// completing a consumed descriptor chain back to the driver.
+//
+//go:nosplit
+func VirtqUsedPush(mem []byte, usedOff int, slot, id uint16, length uint32, newIdx uint16) {
+	o := usedOff + 4 + int(slot)*8
+	putLE32(mem, o, uint32(id))
+	putLE32(mem, o+4, length)
+	putLE16(mem, usedOff+2, newIdx) // used.idx
+}
+
+// little-endian byte helpers (nosplit; the virtqueue accessors avoid
+// encoding/binary so they are safe in the guest-run region).
+//
+//go:nosplit
+func le16(b []byte, o int) uint16 { return uint16(b[o]) | uint16(b[o+1])<<8 }
+
+//go:nosplit
+func le32(b []byte, o int) uint32 {
+	return uint32(b[o]) | uint32(b[o+1])<<8 | uint32(b[o+2])<<16 | uint32(b[o+3])<<24
+}
+
+//go:nosplit
+func le64(b []byte, o int) uint64 { return uint64(le32(b, o)) | uint64(le32(b, o+4))<<32 }
+
+//go:nosplit
+func putLE16(b []byte, o int, v uint16) { b[o] = byte(v); b[o+1] = byte(v >> 8) }
+
+//go:nosplit
+func putLE32(b []byte, o int, v uint32) { putLE16(b, o, uint16(v)); putLE16(b, o+2, uint16(v>>16)) }
+
 // The guest payloads are hand-rolled VS-mode programs honk fully controls, so
 // each milestone proves the H-extension mechanism against code it can decode
 // and host-test (the instruction encoders live in encode.go, the SBI numbers in
@@ -447,12 +506,27 @@ func DBCNGuest() []byte {
 // faults to honk's MMIO trap-and-emulate path. Shared by the guest payload and
 // the board emulator so they agree on the addresses (one owner).
 const (
-	MMIOBase     = 0x1000_0000   // device register window base (below GuestBase)
-	MMIORegMagic = MMIOBase + 0  // load: honk returns MMIOMagic
-	MMIORegOut   = MMIOBase + 8  // store: honk prints the low byte
-	MMIORegArm   = MMIOBase + 16 // store: arm the device's interrupt (a doorbell)
-	MMIORegIRQ   = MMIOBase + 24 // load: read+ack the IRQ status (1 if pending, else 0)
-	MMIOMagic    = 'M'           // the byte a load of MMIORegMagic returns
+	MMIOBase      = 0x1000_0000   // device register window base (below GuestBase)
+	MMIORegMagic  = MMIOBase + 0  // load: honk returns MMIOMagic
+	MMIORegOut    = MMIOBase + 8  // store: honk prints the low byte
+	MMIORegArm    = MMIOBase + 16 // store: arm the device's interrupt (a doorbell)
+	MMIORegIRQ    = MMIOBase + 24 // load: read+ack the IRQ status (1 if pending, else 0)
+	MMIORegNotify = MMIOBase + 32 // store: kick the virtqueue (a virtio QueueNotify)
+	MMIOMagic     = 'M'           // the byte a load of MMIORegMagic returns
+)
+
+// The minimal split virtqueue honk's virtio backend parses from guest RAM. The
+// guest lays the rings and a buffer at these offsets (clear of code, within the
+// first megapage), posts a descriptor chain, and kicks MMIORegNotify; honk reads
+// the avail ring + descriptors, consumes the buffers, writes the used ring, and
+// raises a completion interrupt - the full virtio round trip. Offsets are < 2KiB
+// so the guest can address them with a single addi immediate.
+const (
+	VirtqSize     = 4     // descriptors / ring slots
+	VirtqDescOff  = 0x200 // descriptor table (16 B * VirtqSize)
+	VirtqAvailOff = 0x280 // avail ring (driver -> device)
+	VirtqUsedOff  = 0x300 // used ring (device -> driver)
+	VirtioBufOff  = 0x400 // the guest's data buffer
 )
 
 // MMIOGuest builds a guest that proves MMIO trap-and-emulate: honk catching a
@@ -543,6 +617,71 @@ func IRQGuest(token byte, count int) []byte {
 	ins[handlerLoad+2] = addi(regT0, regT0, handlerIdx*4)
 	ins[waitJump] = jal(regZero, (waitIdx-waitJump)*4)
 	ins[handlerBranch] = beq(regS0, regZero, (shutdownIdx-handlerBranch)*4)
+	return assemble(ins)
+}
+
+// VirtioGuest builds a guest that drives honk's minimal virtio split-virtqueue
+// backend, composing every Phase-E keystone into one device round trip. The
+// guest lays a virtqueue in its own RAM - a descriptor pointing at a buffer
+// holding "vq!", and avail.idx = 1 - enables external interrupts, and kicks the
+// queue with an MMIO store to MMIORegNotify. honk then reads the avail ring and
+// the descriptor from guest memory, consumes the buffer (printing it), writes
+// the used ring, and raises a completion interrupt (hvip.VSEIP); the guest takes
+// it, acks the device with an MMIO status read, and halts. So the printed "vq!"
+// proves the whole chain: MMIO notify -> virtqueue parse from guest memory ->
+// consume -> used ring -> completion IRQ -> guest ack.
+func VirtioGuest() []byte {
+	const (
+		seie    = 1 << 9
+		sie     = 1 << 1
+		message = 'v' | 'q'<<8 | '!'<<16 // "vq!" little-endian (bit 31 clear)
+		msgLen  = 3
+	)
+	var ins []uint32
+	emit := func(words ...uint32) { ins = append(ins, words...) }
+
+	emit(loadImm32(regS1, MMIOBase)...) // s1 = device mmio base
+	emit(addi(regS2, regZero, 1))
+	emit(slli(regS2, regS2, 31)) // s2 = GuestBase (for guest-RAM addresses)
+
+	// install the interrupt handler and enable VS external interrupts.
+	handlerLoad := len(ins)
+	emit(loadAddr(regT0, 0)...) // li t0, &handler (offset patched below)
+	emit(csrw(csrStvec, regT0))
+	emit(addi(regT0, regZero, seie))
+	emit(csrs(csrSie, regT0))
+	emit(addi(regT0, regZero, sie))
+	emit(csrs(csrSstatus, regT0))
+
+	// lay the virtqueue: buffer="vq!"; desc[0]={addr=buf, len=msgLen}; avail.idx=1.
+	emit(loadImm32(regT0, message)...)
+	emit(sd(regT0, regS2, VirtioBufOff)) // the buffer bytes
+	emit(addi(regT0, regS2, VirtioBufOff))
+	emit(sd(regT0, regS2, VirtqDescOff)) // desc[0].addr = bufGPA
+	emit(addi(regT0, regZero, msgLen))
+	emit(sd(regT0, regS2, VirtqDescOff+8)) // desc[0].len (flags/next = 0)
+	emit(loadImm32(regT0, 1<<16)...)
+	emit(sd(regT0, regS2, VirtqAvailOff)) // avail.flags=0, idx=1, ring[0]=0
+
+	// kick the queue (a virtio QueueNotify).
+	emit(addi(regT0, regZero, 1))
+	emit(sb(regT0, regS1, MMIORegNotify-MMIOBase))
+
+	// wait for the completion interrupt.
+	waitIdx := len(ins)
+	emit(opWFI)
+	waitJump := len(ins)
+	emit(0) // jal x0, wait (patched)
+
+	// handler: ack the device IRQ and shut down.
+	handlerIdx := len(ins)
+	emit(lbu(regT0, regS1, MMIORegIRQ-MMIOBase)) // read+ack (honk withdraws VSEIP)
+	emit(addi(regA7, regZero, SBIShutdown))
+	emit(opEcall)
+	emit(opJ0)
+
+	ins[handlerLoad+2] = addi(regT0, regT0, handlerIdx*4)
+	ins[waitJump] = jal(regZero, (waitIdx-waitJump)*4)
 	return assemble(ins)
 }
 

@@ -522,10 +522,14 @@ is front-loaded; the OS logic on top of it is small because it is Go.
       (`vmm.DecodeMMIO`), and emulating the register - shell `vm mmio`.
       (4) external-interrupt injection: honk delivering a device interrupt to
       the guest via `hvip.VSEIP`, acked through an MMIO status read - shell
-      `vm irq`. Together these are the device-emulation toolkit; remaining for
-      M13: a real emulated virtio device (mmio regs + a guest virtqueue +
-      completion IRQ), a guest device tree, and time-sharing a hart. See
-      `docs/STATUS.md`.
+      `vm irq`. (5) a virtio split-virtqueue device backend: the guest posts a
+      buffer and kicks the queue; honk parses it from guest memory, consumes
+      it, and signals completion - composing every keystone - shell `vm
+      virtio`. Every M13 *mechanism* is now proven; the remaining work is
+      *integration* - a real (Linux/rCore) kernel image, a guest device tree,
+      PLIC/AIA + the stock virtio-mmio handshake, virtio-fs, and time-sharing a
+      hart - which needs an external kernel image and is the M13 deliverable.
+      See `docs/STATUS.md`.
 
 ---
 

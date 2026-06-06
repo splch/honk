@@ -147,9 +147,14 @@ EOF
 # external interrupts honk injects (hvip.VSEIP), acking each via an MMIO status
 # read - so "guest IRQs: ###" appears only if external-interrupt injection and
 # the device-ack path work (the path a virtio backend signals completion with).
-# No devices needed; the guests run from a G-stage-mapped RAM buffer.
-boot $'\nvm\nvm timer\nvm paging\nvm dbcn\nvm mmio\nvm irq\nexit\n' "$VV"
-want "$VV" "vmm/M11+M12+paging+dbcn+mmio+irq" <<'EOF'
+# `vm virtio` is the capstone: a guest posts "vq!" on a split virtqueue and kicks
+# it; honk parses the queue from guest memory, consumes the buffer (printing it),
+# completes on the used ring, and raises a completion interrupt the guest acks -
+# so "guest console: vq!" appears only if the whole virtio round trip (MMIO +
+# guest-memory virtqueue parse + interrupt injection) works. No devices needed;
+# the guests run from a G-stage-mapped RAM buffer.
+boot $'\nvm\nvm timer\nvm paging\nvm dbcn\nvm mmio\nvm irq\nvm virtio\nexit\n' "$VV"
+want "$VV" "vmm/M11+M12+paging+dbcn+mmio+irq+virtio" <<'EOF'
 launching a VS-mode guest
 hello from a guest VM
 guest halted (SBI shutdown)
@@ -163,6 +168,8 @@ launching an mmio guest
 guest console: Mmio
 launching an irq guest
 guest IRQs: ###
+launching a virtio guest
+guest console: vq!
 EOF
 
 # Run R: stateless reset clears the writable layer; the immutable core remains.

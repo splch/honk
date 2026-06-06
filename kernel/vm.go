@@ -36,8 +36,12 @@ const timerTicks = 5
 // the keystone for the interrupt controller and virtio backends. `vm irq` runs
 // a fourth: a guest that arms an emulated device and takes the external
 // interrupts honk injects (hvip.VSEIP), acking each via an MMIO status read -
-// the device-interrupt path a virtio backend signals completion with. Guest
-// output appears inline on honk's console.
+// the device-interrupt path a virtio backend signals completion with. `vm
+// virtio` runs the capstone: a guest that posts a buffer on a split virtqueue
+// and kicks it, which honk parses from guest memory, consumes (printing the
+// buffer), completes on the used ring, and signals with a completion interrupt
+// - every keystone composed into one virtio device round trip. Guest output
+// appears inline on honk's console.
 func vmcmd(fields []string) {
 	if len(fields) > 1 && fields[1] == "timer" {
 		guest := vmm.TimerGuest('*', timerTicks)
@@ -84,6 +88,16 @@ func vmcmd(fields []string) {
 			len(guest), irqs)
 		fmt.Print("vm: guest IRQs: ")
 		reason := virt.RunGuest(guest) // one '#' prints per injected+acked interrupt
+		fmt.Printf("\nvm: %s\n", reason)
+		return
+	}
+
+	if len(fields) > 1 && fields[1] == "virtio" {
+		guest := vmm.VirtioGuest()
+		fmt.Printf("vm: launching a virtio guest (%d bytes): a split-virtqueue device round trip\n",
+			len(guest))
+		fmt.Print("vm: guest console: ")
+		reason := virt.RunGuest(guest) // honk prints the queued buffer ("vq!") as it consumes it
 		fmt.Printf("\nvm: %s\n", reason)
 		return
 	}

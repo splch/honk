@@ -18,7 +18,8 @@ const (
 	regT1   = 6  // x6:  temporary
 	regT2   = 7  // x7:  temporary (the paging guest's load destination)
 	regS0   = 8  // x8:  saved (survives the guest's own trap, used as a counter)
-	regS1   = 9  // x9:  saved (survives traps; the irq guest's device base)
+	regS1   = 9  // x9:  saved (survives traps; a guest's device base)
+	regS2   = 18 // x18: saved (the virtio guest's GuestBase, for guest-RAM addresses)
 	regA0   = 10 // x10: SBI arg0 / return value
 	regA1   = 11 // x11: SBI arg1 / return value
 	regA2   = 12 // x12: SBI arg2 (e.g. DBCN console_write base_addr_hi)

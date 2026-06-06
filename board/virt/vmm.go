@@ -138,6 +138,8 @@ type vmRun struct {
 	// quantum, pending until the guest acks it by reading MMIORegIRQ.
 	irqArmed   bool
 	irqPending bool
+
+	vqLast uint16 // last avail.idx the virtio backend has consumed
 }
 
 // dbcnMaxWrite caps one DBCN console_write so a guest cannot make honk spin
@@ -321,8 +323,41 @@ func (r *vmRun) mmioStore(gpa, val uint64) bool {
 	case vmm.MMIORegArm:
 		r.irqArmed = true // doorbell: honk now raises the device IRQ each quantum
 		return true
+	case vmm.MMIORegNotify:
+		r.virtioProcess() // a virtio QueueNotify: drain the queue and signal completion
+		return true
 	}
 	return false
+}
+
+// virtioProcess is honk's minimal virtio split-virtqueue backend: on a queue
+// notify it consumes every newly-available descriptor chain, prints the buffer
+// bytes (this device is a console transmit queue), publishes each to the used
+// ring, and raises a completion interrupt. It composes the Phase-E keystones -
+// it parses the rings from guest memory, validates a guest-supplied descriptor
+// address with vmm.GuestRange before following it, and signals via hvip.VSEIP.
+// nosplit (it runs in the guest-run region); the drain is bounded by the queue
+// size so a guest cannot make it spin.
+//
+//go:nosplit
+func (r *vmRun) virtioProcess() {
+	availIdx := vmm.VirtqAvailIdx(r.mem, vmm.VirtqAvailOff)
+	for n := 0; r.vqLast != availIdx && n < vmm.VirtqSize; n++ {
+		slot := r.vqLast % vmm.VirtqSize
+		head := vmm.VirtqAvailRing(r.mem, vmm.VirtqAvailOff, slot)
+		if head < vmm.VirtqSize { // ignore an out-of-range descriptor index
+			addr, length, _, _ := vmm.VirtqDesc(r.mem, vmm.VirtqDescOff, head)
+			if start, end, ok := vmm.GuestRange(addr, uint64(length), vmm.GuestBase, uint64(len(r.mem))); ok {
+				for i := start; i < end; i++ {
+					sbiPutchar(r.mem[i])
+				}
+			}
+			vmm.VirtqUsedPush(r.mem, vmm.VirtqUsedOff, slot, head, length, r.vqLast+1)
+		}
+		r.vqLast++
+	}
+	r.irqPending = true // completion: raise the device interrupt
+	writeHvip(readHvip() | hvipVSEIP)
 }
 
 // reportGuestFault prints an unexpected guest trap's CSRs straight to the SBI

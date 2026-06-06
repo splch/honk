@@ -431,6 +431,101 @@ func TestIRQGuestEncoding(t *testing.T) {
 	}
 }
 
+// TestVirtqBackend lays out a split virtqueue in a guest-RAM slice exactly as
+// VirtioGuest does, then runs the accessors the backend uses to parse it -
+// asserting it finds the descriptor, validates+reads the buffer through
+// GuestRange, and publishes the used ring. This host-tests the virtqueue
+// parsing (the part with real off-by-one risk); QEMU then proves the H-extension
+// path delivers a guest's notify to it.
+func TestVirtqBackend(t *testing.T) {
+	mem := make([]byte, 2<<20)
+	const msg = "vq!"
+	copy(mem[VirtioBufOff:], msg)
+	bufGPA := uint64(GuestBase + VirtioBufOff)
+
+	// desc[0] = {addr=bufGPA, len=3}; avail.idx=1, ring[0]=0 (as the guest writes).
+	putLE32(mem, VirtqDescOff, uint32(bufGPA))
+	putLE32(mem, VirtqDescOff+4, uint32(bufGPA>>32))
+	putLE32(mem, VirtqDescOff+8, uint32(len(msg)))
+	putLE16(mem, VirtqAvailOff+2, 1) // avail.idx
+	putLE16(mem, VirtqAvailOff+4, 0) // avail.ring[0] = descriptor 0
+
+	if idx := VirtqAvailIdx(mem, VirtqAvailOff); idx != 1 {
+		t.Fatalf("avail idx = %d, want 1", idx)
+	}
+	head := VirtqAvailRing(mem, VirtqAvailOff, 0)
+	if head != 0 {
+		t.Fatalf("avail ring[0] = %d, want 0", head)
+	}
+	addr, length, flags, _ := VirtqDesc(mem, VirtqDescOff, head)
+	if addr != bufGPA || length != uint32(len(msg)) || flags != 0 {
+		t.Fatalf("desc[0] = {%#x, %d, %#x}, want {%#x, %d, 0}", addr, length, flags, bufGPA, len(msg))
+	}
+	start, end, ok := GuestRange(addr, uint64(length), GuestBase, uint64(len(mem)))
+	if !ok || string(mem[start:end]) != msg {
+		t.Fatalf("buffer = %q (ok=%v), want %q", mem[start:end], ok, msg)
+	}
+
+	VirtqUsedPush(mem, VirtqUsedOff, 0, head, length, 1)
+	if got := le16(mem, VirtqUsedOff+2); got != 1 {
+		t.Fatalf("used.idx = %d, want 1", got)
+	}
+	if id := le32(mem, VirtqUsedOff+4); id != uint32(head) {
+		t.Fatalf("used.ring[0].id = %d, want %d", id, head)
+	}
+	if l := le32(mem, VirtqUsedOff+8); l != length {
+		t.Fatalf("used.ring[0].len = %d, want %d", l, length)
+	}
+}
+
+// TestVirtioGuestEncoding decodes the generated virtio payload and asserts it
+// builds the message, posts a descriptor + avail ring (sd stores), kicks the
+// queue (an sb to MMIORegNotify), installs a handler, idles, and its handler
+// acks the device (lbu of MMIORegIRQ) and shuts down.
+func TestVirtioGuestEncoding(t *testing.T) {
+	code := decode(t, VirtioGuest())
+
+	// handler-address load: li t0,1; slli t0,31; addi t0,off (after the s1 and s2
+	// builds at indices 0..3, so loadAddr is at indices 4..6).
+	if code[4] != addi(regT0, regZero, 1) || code[5] != slli(regT0, regT0, 31) {
+		t.Fatalf("handler-address load malformed: %#08x %#08x", code[4], code[5])
+	}
+	handlerOff := int(int32(code[6]) >> 20)
+	if handlerOff%4 != 0 || handlerOff/4 >= len(code) {
+		t.Fatalf("handler offset %d invalid (len %d words)", handlerOff, len(code))
+	}
+	// the handler acks the device: an lbu (load, width 1).
+	if acc, ok := DecodeMMIO(code[handlerOff/4]); !ok || acc.Store || acc.Width != 1 {
+		t.Fatalf("handler[0] = %#08x, want an lbu (device ack); got %+v ok=%v", code[handlerOff/4], acc, ok)
+	}
+	// at least four sd (the buffer, desc.addr, desc.len, avail) and one sb (kick).
+	sd, sb := 0, 0
+	for _, w := range code {
+		if acc, ok := DecodeMMIO(w); ok && acc.Store {
+			switch acc.Width {
+			case 8:
+				sd++
+			case 1:
+				sb++
+			}
+		}
+	}
+	if sd < 4 {
+		t.Fatalf("found %d sd stores, want >= 4 (buffer + descriptor + avail)", sd)
+	}
+	if sb < 1 {
+		t.Fatalf("found %d sb stores, want >= 1 (the MMIORegNotify kick)", sb)
+	}
+	// shutdown tail.
+	tail := len(code) - 3
+	if op, rd, _, _, imm := fields(code[tail]); op != 0x13 || rd != regA7 || imm != SBIShutdown {
+		t.Fatalf("shutdown = %#08x, want li a7,%d", code[tail], SBIShutdown)
+	}
+	if code[tail+1] != opEcall || code[tail+2] != opJ0 {
+		t.Fatalf("shutdown tail = %#08x %#08x", code[tail+1], code[tail+2])
+	}
+}
+
 // imm decoders for the variable-length jump/branch formats, used to verify the
 // generated TimerGuest's control flow lands where intended.
 func jalOff(in uint32) int {
