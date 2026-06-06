@@ -24,14 +24,16 @@ is downloaded and built automatically on first use.
 ```
 kernel/        the HS-mode Go program (the OS): boot, SMP demo, shell
 kernel/proc/   process model: goroutine + context + capabilities (host-tested)
-board/virt/    QEMU virt board: HS-mode startup, SMP, traps, PLIC, UART, SBI
+block/         block-device interface (host-tested)
+board/virt/    QEMU virt board: startup, SMP, traps, PLIC, UART, virtio-blk, SBI
 tools/         build.sh, run-qemu.sh, smoke-test.sh, mkboot (boot trampoline)
 HONK.md        full design and roadmap
 docs/STATUS.md what works today and what's next
 GO.md RV64.md OS.md   language / hardware / domain references
 ```
 
-Status: **Phase A complete (M0-M2)** - HS-mode boot under OpenSBI, SMP across
-all harts, an interrupt-driven UART console with an interactive shell, and a
-process model (goroutine + context + capabilities, `recover()` fault domains).
-`make run` drops you at a `honk>` prompt; try `help`. See `docs/STATUS.md`.
+Status: **Phase A complete (M0-M2); Phase B underway (M3 done)** - HS-mode boot
+under OpenSBI, SMP across all harts, an interrupt-driven UART console + shell, a
+process model (goroutine + context + capabilities, `recover()` fault domains),
+and a persistent virtio-blk block device. `make run` drops you at a `honk>`
+prompt; try `help`. See `docs/STATUS.md`.

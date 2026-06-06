@@ -89,6 +89,11 @@ TEXT ·triggerFault(SB),NOSPLIT,$0
 	WORD	$0x00100073		// ebreak
 	RET
 
+// func fence()  - full memory + I/O barrier (orders DMA setup before doorbell).
+TEXT ·fence(SB),NOSPLIT,$0
+	FENCE
+	RET
+
 // CSR readers (S-mode trap CSRs).
 TEXT ·readScause(SB),NOSPLIT,$0-8
 	CSRRS	ZERO, SCAUSE, T0

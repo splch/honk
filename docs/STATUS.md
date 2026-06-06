@@ -21,8 +21,9 @@ distribution (`tamago-go`) is auto-built on first use into the OS cache dir.
 | **M0 boot + SMP + hello** | ✅ **complete** | Boots in HS-mode under OpenSBI on QEMU virt; **all harts run Go Ms** (`GOMAXPROCS=nharts`), scheduler spreads goroutines across every hart; clean SBI shutdown. Verified at `-smp 1/4/8`, boot-hart-agnostic. |
 | **M1 IRQ + console + shell** | ✅ **complete** | honk S-mode trap vector (proper `sret`); UART RX interrupt → PLIC → ring → channel; interactive shell over the UART; S-mode exceptions print `scause`/`sepc`/`stval` and halt. |
 | **M2 process model** | ✅ **complete** | `proc` table = goroutine + `context` (cancel = kill) + capabilities; `run`/`ps`/`kill`/`crash`/`reap`/`stress` shell commands; `recover()` fault domains (a panicking process is reaped, kernel + siblings survive); race-tested (`go test -race ./kernel/proc`) and stressed under `-smp 4`. |
+| **M3 block device** | ✅ **complete** | `block.Device` interface backed by a virtio-blk driver (virtio-mmio v2, split virtqueue, 3-descriptor chains, polled completion); `blk` shell self-test; verified detection, read/write round-trip, and persistence to the backing file. NVMe-over-PCIe is a future backend behind the same interface. |
 
-**Phase A (foundation) is complete.** Next is Phase B (storage): M3 PCIe + NVMe.
+**Phase A complete; Phase B (storage) underway.** Next: M4 KV store + VFS.
 
 ## What boots today (M0+M1)
 
@@ -171,9 +172,33 @@ whatever OpenSBI selects; `InitSMP` skips it and starts all the others.
 `maxHarts` (currently 8) bounds the hand-off tables; raise it and re-test for
 larger `-smp` values.
 
-## Next: M3 (Phase B - storage)
+## Block storage (M3) - how it works
 
-PCIe ECAM enumeration and an NVMe driver (with a virtio-blk fallback)
-implementing a `BlockDevice` interface. RAM size is now DTB-derived; hart count
-is SBI-probed and MMIO bases are board constants (standard for a fixed board),
-so a full FDT parser is optional until honk targets boards beyond QEMU virt.
+`block.Device` (package `honk/block`) is the storage abstraction - four methods
+(`BlockSize`/`Blocks`/`ReadBlocks`/`WriteBlocks`), no transport details leaked.
+It is pure Go, so the storage stack above it (the M4 KV store) is host-testable.
+
+The backend is a focused **virtio-blk** driver (`board/virt/virtioblk.go`) over
+virtio-mmio v2 (RV64.md §7.4): probe the 8 mmio slots for `DeviceID==2`, do the
+reset/ACK/feature(`VERSION_1`)/`FEATURES_OK` handshake, set up one split
+virtqueue, read capacity from config. Each request is a 3-descriptor chain
+(header / data / status) published to the available ring; completion is polled
+on the used ring (synchronous I/O behind the interface; the IRQ path is a later
+optimization). honk is identity-mapped (satp=0) and its GC is non-moving, so a
+pinned `[]byte` is DMA-addressable at its own address - no separate DMA arena.
+
+QEMU needs `-global virtio-mmio.force-legacy=false` (its virtio-mmio defaults to
+legacy v1; honk targets the modern v2 transport) plus a `-drive` +
+`virtio-blk-device`. The `blk` shell command runs a write/read-back self-test;
+persistence to the backing file is verified.
+
+**Scoped out of M3 (behind the interface):** NVMe-over-PCIe (PCIe ECAM + NVMe
+queues). virtio-blk is the roadmap's named fallback and the working path on
+QEMU virt's default virtio; NVMe can be added as a second `block.Device` with
+no change to anything above it.
+
+## Next: M4
+
+Log-structured KV store over `block.Device` (single-writer appender draining a
+channel = group commit; lock-free snapshot readers; checksummed WAL + atomic
+checkpoint), exposed as `io/fs.FS` and overlaid with the `embed.FS` core.

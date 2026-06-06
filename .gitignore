@@ -4,5 +4,6 @@
 *.o
 *.dtb
 
-# data images for NVMe/virtio-blk (later milestones)
+# data images for NVMe/virtio-blk
 /data.img
+/disk.img

@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"runtime"
@@ -59,7 +60,7 @@ func exec(line string) {
 		fmt.Println("commands:")
 		fmt.Println("  help  harts  uptime  mem  echo <text>")
 		fmt.Println("  run [name]   ps   kill <pid>   crash   reap   stress [n]")
-		fmt.Println("  fault  exit")
+		fmt.Println("  blk   fault  exit")
 	case "harts":
 		fmt.Printf("harts: %d online  GOMAXPROCS=%d  this=hart %d\n",
 			virt.NumHarts(), runtime.GOMAXPROCS(-1), virt.CurrentHart())
@@ -108,6 +109,8 @@ func exec(line string) {
 		fmt.Printf("reaped %d terminated processes\n", procs.Reap())
 	case "stress":
 		stress(fields)
+	case "blk":
+		blk()
 
 	case "fault":
 		fmt.Println("fault: raising a supervisor exception...")
@@ -117,6 +120,39 @@ func exec(line string) {
 		virt.Shutdown() // does not return
 	default:
 		fmt.Printf("unknown command: %q (try 'help')\n", fields[0])
+	}
+}
+
+// blk reports the block device and runs a write/read-back self-test on its last
+// block (avoiding live data) to prove the driver round-trips.
+func blk() {
+	d := virt.Block()
+	if d == nil {
+		fmt.Println("blk: no block device")
+		return
+	}
+	bs := d.BlockSize()
+	fmt.Printf("blk: virtio-blk  %d blocks x %d B = %d MiB\n",
+		d.Blocks(), bs, d.Blocks()*int64(bs)>>20)
+
+	last := d.Blocks() - 1
+	w := make([]byte, bs)
+	for i := range w {
+		w[i] = byte(i*7 + 1)
+	}
+	if err := d.WriteBlocks(last, w); err != nil {
+		fmt.Printf("blk: write error: %v\n", err)
+		return
+	}
+	r := make([]byte, bs)
+	if err := d.ReadBlocks(last, r); err != nil {
+		fmt.Printf("blk: read error: %v\n", err)
+		return
+	}
+	if bytes.Equal(w, r) {
+		fmt.Printf("blk: read/write self-test OK (block %d)\n", last)
+	} else {
+		fmt.Println("blk: read/write self-test MISMATCH")
 	}
 }
 

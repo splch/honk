@@ -317,6 +317,12 @@ is front-loaded; the OS logic on top of it is small because it is Go.
 
 **Phase B - storage**
 4. **M3 PCIe + NVMe** (virtio-blk fallback) implementing `BlockDevice`.
+   - *Status:* **block device COMPLETE + verified.** `block.Device` interface
+     (`honk/block`) backed by a focused virtio-blk driver (virtio-mmio v2,
+     split virtqueue, 3-descriptor chains, polled completion); `blk` shell
+     self-test; detection, read/write round-trip, and on-disk persistence all
+     verified. NVMe-over-PCIe is scoped out for now but slots in behind the
+     same interface with no change above it. See `docs/STATUS.md`.
 5. **M4 KV store + VFS.** Log-structured KV -> `io/fs.FS`; overlay with the
    `embed.FS` core; `ls`/`cat`/`cp`.
 6. **M5 Immutable core.** `mkimage` verity + A/B; boot verifies + serves R-O;

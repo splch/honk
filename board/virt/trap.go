@@ -31,6 +31,9 @@ func mmioWrite8(addr uintptr, v uint8)
 func mmioRead32(addr uintptr) uint32
 func mmioWrite32(addr uintptr, v uint32)
 
+// fence is a full memory + I/O barrier (trap_riscv64.s).
+func fence()
+
 // handleIRQ services an S-mode interrupt synchronously, from trap context. It
 // claims the PLIC, drains the UART into the input ring, and completes - leaving
 // nothing pending, so the sret in trapEntry does not storm.

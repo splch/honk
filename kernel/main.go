@@ -43,6 +43,9 @@ func main() {
 	// (or piped) during the demo below is captured into the channel.
 	virt.InitConsole()
 
+	// Discover the block device (M3).
+	virt.InitStorage()
+
 	// Prove the scheduler actually runs goroutines across multiple harts.
 	harts := smpDemo(nharts)
 	if len(harts) > 1 {

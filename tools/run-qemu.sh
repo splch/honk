@@ -13,8 +13,13 @@ cd "$(dirname "$0")/.."
 
 { [ -f boot.bin ] && [ -f honk.elf ]; } || tools/build.sh
 
+# Backing store for the virtio-blk device (created once, 16 MiB).
+DISK="${DISK:-disk.img}"
+[ -f "$DISK" ] || dd if=/dev/zero of="$DISK" bs=1048576 count=16 2>/dev/null
+
 exec qemu-system-riscv64 \
 	-machine virt \
+	-global virtio-mmio.force-legacy=false \
 	-cpu rv64,h=true \
 	-smp "${SMP:-4}" \
 	-m "${MEM:-512M}" \
@@ -22,4 +27,6 @@ exec qemu-system-riscv64 \
 	-bios default \
 	-no-reboot \
 	-kernel boot.bin \
-	-device loader,file=honk.elf
+	-device loader,file=honk.elf \
+	-drive file="$DISK",if=none,id=blk0,format=raw \
+	-device virtio-blk-device,drive=blk0
